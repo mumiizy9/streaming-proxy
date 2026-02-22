@@ -299,10 +299,6 @@ def animegojo_episode(ep_id):
     link2_match = re.search(r'link2=([A-Za-z0-9+/=]+)', r.text)
     link2 = link2_match.group(1) if link2_match else ''
 
-    embed_url = ''
-    if link2:
-        embed_url = f"https://anccplayer.cyou/source/playeradsg.php?link=&link2={link2}&o=&w=mg&d="
-
     # Find next/prev episode links
     soup = BeautifulSoup(r.text, 'lxml')
     all_ep_links = []
@@ -322,10 +318,12 @@ def animegojo_episode(ep_id):
     next_ep = all_ep_links[current_idx + 1] if current_idx >= 0 and current_idx + 1 < len(all_ep_links) else None
 
     videos = []
-    if embed_url:
+    if link2:
+        m3u8_url = f'https://youtube.anccplayer.cyou/playg.php?uid={link2}'
         videos.append({
-            'embed_url': embed_url,
-            'type': 'iframe',
+            'type': 'hls',
+            'video_id': link2,
+            'm3u8_url': m3u8_url,
             'server': 1,
         })
 
@@ -1110,6 +1108,8 @@ def get_hls_variant(variant_url):
         referer = 'https://top-cdn.com/'
     elif 'ok-hd.com' in variant_url:
         referer = 'https://ok-hd.com/'
+    elif 'anccplayer' in variant_url:
+        referer = 'https://anccplayer.cyou/'
 
     r = safe_request(variant_url, 'hls', headers={
         'Referer': referer,
@@ -1422,6 +1422,17 @@ def hls_topcdn(hash_id):
                     headers={'Access-Control-Allow-Origin': '*'})
 
 
+@app.route('/hls/ancc/<link2>')
+def hls_ancc(link2):
+    """Proxy master m3u8 from anccplayer (AnimeGojo)."""
+    m3u8_url = f'https://youtube.anccplayer.cyou/playg.php?uid={link2}'
+    content = get_generic_hls_master(m3u8_url, 'https://anccplayer.cyou/')
+    if content is None:
+        return 'Not found', 404
+    return Response(content, content_type='application/vnd.apple.mpegurl',
+                    headers={'Access-Control-Allow-Origin': '*'})
+
+
 @app.route('/hls/variant/<encoded_url>')
 def hls_variant(encoded_url):
     """Proxy variant m3u8 playlist."""
@@ -1448,6 +1459,8 @@ def hls_segment(encoded_url):
         referer = 'https://top-cdn.com/'
     elif 'ok-hd.com' in url:
         referer = 'https://ok-hd.com/'
+    elif 'anccplayer' in url:
+        referer = 'https://anccplayer.cyou/'
 
     r = safe_request(url, 'hls', headers={
         'Referer': referer,

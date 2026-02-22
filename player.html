@@ -783,7 +783,10 @@ function playHLS(videoId, m3u8Url) {
 
     // Determine master URL based on CDN source
     let masterUrl;
-    if (m3u8Url && (m3u8Url.includes('top-cdn.com') || m3u8Url.includes('ok-hd.com'))) {
+    if (m3u8Url && m3u8Url.includes('anccplayer')) {
+        // AnimeGojo anccplayer HLS
+        masterUrl = `/hls/ancc/${videoId}`;
+    } else if (m3u8Url && (m3u8Url.includes('top-cdn.com') || m3u8Url.includes('ok-hd.com'))) {
         // WowDrama top-cdn/ok-hd HLS
         const cdn = m3u8Url.includes('ok-hd.com') ? 'ok-hd.com' : 'top-cdn.com';
         masterUrl = `/hls/topcdn/${videoId}?cdn=${cdn}`;
