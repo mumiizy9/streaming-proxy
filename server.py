@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Multi-Source Streaming Proxy Server
-Sources: animeruka.com, series-days.com, 24-hdmovie.com
+Sources: animegojo.com, series-days.com, 24-hdmovie.com, wow-drama.com
 Features: HLS proxy, privacy protection, auto-next, stall recovery
 """
 
@@ -133,131 +133,147 @@ def decode_url(encoded):
         return ''
 
 # ============================================================
-# ANIMERUKA.COM SCRAPER (DooPlay Theme)
+# ANIMEGOJO.COM SCRAPER (Custom Site)
 # ============================================================
-ANIMERUKA_BASE = 'https://animeruka.com'
-ANIMERUKA_API = f'{ANIMERUKA_BASE}/wp-json/dooplayer/v2'
+ANIMEGOJO_BASE = 'https://animegojo.com'
 
-ANIMERUKA_CATEGORIES = {
-    'all': '/anime/',
-    'ซับไทย': '/catalog/ซับไทย/',
-    'พากย์ไทย': '/catalog/พากย์ไทย/',
-    'action': '/genre/action/',
-    'adventure': '/genre/adventure/',
-    'comedy': '/genre/comedy/',
-    'drama': '/genre/drama/',
-    'fantasy': '/genre/fantasy/',
-    'horror': '/genre/horror/',
-    'isekai': '/genre/isekai/',
-    'mecha': '/genre/mecha/',
-    'mystery': '/genre/mystery/',
-    'romance': '/genre/romance/',
-    'school': '/genre/school/',
-    'sci-fi': '/genre/sci-fi/',
-    'shounen': '/genre/shounen/',
-    'slice-of-life': '/genre/slice-of-life/',
-    'sports': '/genre/sports/',
-    'supernatural': '/genre/supernatural/',
+ANIMEGOJO_CATEGORIES = {
+    'all': '/',
+    'Action': '/category/action/',
+    'Adventure': '/category/adventure/',
+    'Comedy': '/category/comedy/',
+    'Drama': '/category/drama/',
+    'Fantasy': '/category/fantasy/',
+    'Horror': '/category/horror/',
+    'Mystery': '/category/mystery/',
+    'Romance': '/category/romance/',
+    'Sci-Fi': '/category/sci-fi/',
+    'Sports': '/category/sports/',
+    'Supernatural': '/category/supernatural/',
+    'Historical': '/category/historical/',
+    'Ecchi': '/category/ecchi/',
+    'Demons': '/category/demons/',
+    'Game': '/category/game/',
+    'Kids': '/category/kids/',
 }
 
-def animeruka_catalog(page=1, category='all'):
-    """Get anime catalog from animeruka."""
-    cat_path = ANIMERUKA_CATEGORIES.get(category, '/anime/')
-    url = f"{ANIMERUKA_BASE}{cat_path}page/{page}/"
-    r = safe_request(url, 'animeruka')
+def animegojo_catalog(page=1, category='all'):
+    """Get anime catalog from animegojo."""
+    cat_path = ANIMEGOJO_CATEGORIES.get(category, '/')
+    if page > 1:
+        url = f"{ANIMEGOJO_BASE}{cat_path}{page}/"
+    else:
+        url = f"{ANIMEGOJO_BASE}{cat_path}"
+    r = safe_request(url, 'animegojo')
     if not r or r.status_code != 200:
         return {'items': [], 'page': page, 'has_next': False}
 
     soup = BeautifulSoup(r.text, 'lxml')
     items = []
-    for article in soup.select('article.item'):
-        # DooPlay: <article class="item"> <div class="poster"> <img> <a><h3><div class="movie-title">
-        link = article.select_one('.poster a, a[href]')
-        img = article.select_one('img')
-        # Title in movie-title div inside h3 inside a
-        title_el = article.select_one('.movie-title, h3, .data h3')
-        quality = article.select_one('.quality, .features-type')
-        ep_status = article.select_one('.features-status')
 
-        if link:
-            href = link.get('href', '')
-            slug = href.rstrip('/').split('/')[-1] if href else ''
-            title = title_el.get_text(strip=True) if title_el else slug
-            image = ''
-            if img:
-                image = img.get('src', '') or img.get('data-src', '') or img.get('data-lazy-src', '')
-            item = {
-                'title': title,
-                'slug': slug,
-                'url': href,
-                'image': image,
-                'quality': quality.get_text(strip=True) if quality else '',
-                'status': ep_status.get_text(strip=True) if ep_status else '',
-            }
-            items.append(item)
+    # Items are <a href="/list/{id}/{slug}"> tags
+    for a in soup.find_all('a', href=True):
+        href = a.get('href', '')
+        m = re.match(r'^/list/(\d+)/(.+?)/?$', href)
+        if not m:
+            continue
+        item_id = m.group(1)
+        item_slug = m.group(2)
+        text = a.get_text(strip=True)
+        if not text or len(text) < 3:
+            continue
 
-    # Check for next page
-    has_next = bool(soup.select_one('.pagination .next, .nav-next, a.arrow_pag[href]'))
-    # Also check for numbered pagination
-    if not has_next:
-        has_next = bool(re.search(rf'page/{page + 1}/', r.text))
+        # Parse title and episode info
+        title = text
+        ep_info = ''
+        ep_match = re.search(r'(EP\s*[\d\-]+(?:\s*\([^)]+\))?)', text)
+        if ep_match:
+            ep_info = ep_match.group(1)
+            title = text[:ep_match.start()].strip()
+
+        # Language tag
+        lang = ''
+        if 'พากย์ไทย' in text:
+            lang = 'พากย์ไทย'
+        elif 'ซับไทย' in text:
+            lang = 'ซับไทย'
+
+        image = f"{ANIMEGOJO_BASE}/img/{item_id}-{item_slug}.webp"
+        combined_slug = f"{item_id}---{item_slug}"
+
+        items.append({
+            'title': title,
+            'slug': combined_slug,
+            'url': f"{ANIMEGOJO_BASE}{href}",
+            'image': image,
+            'quality': lang,
+            'status': ep_info,
+        })
+
+    # Deduplicate by slug
+    seen = set()
+    unique_items = []
+    for it in items:
+        if it['slug'] not in seen:
+            seen.add(it['slug'])
+            unique_items.append(it)
+    items = unique_items
+
+    has_next = bool(re.search(rf'/{page + 1}/', r.text))
 
     return {'items': items, 'page': page, 'has_next': has_next}
 
 
-def animeruka_detail(slug):
-    """Get anime detail with episode list."""
-    url = f"{ANIMERUKA_BASE}/anime/{slug}/"
-    r = safe_request(url, 'animeruka')
+def animegojo_detail(slug):
+    """Get anime detail with episode list. Slug format: {id}---{text_slug}"""
+    parts = slug.split('---', 1)
+    if len(parts) != 2:
+        return None
+    item_id, text_slug = parts
+
+    url = f"{ANIMEGOJO_BASE}/list/{item_id}/{text_slug}"
+    r = safe_request(url, 'animegojo')
     if not r or r.status_code != 200:
         return None
 
     soup = BeautifulSoup(r.text, 'lxml')
 
-    # Get title and info
+    # Title from div.title h1
     title = ''
-    title_el = soup.select_one('.sheader .data h1')
+    title_el = soup.select_one('div.title h1')
     if title_el:
         title = title_el.get_text(strip=True)
+        title = re.sub(r'\s*ตอนที่\s*[\d\-]+\s*$', '', title).strip()
 
-    # Get poster image
-    poster = ''
-    poster_el = soup.select_one('.sheader .poster img')
-    if poster_el:
-        poster = poster_el.get('src', '') or poster_el.get('data-src', '')
+    poster = f"{ANIMEGOJO_BASE}/img/{item_id}-{text_slug}.webp"
 
-    # Get synopsis
+    # Synopsis from detail2
     synopsis = ''
-    syn_el = soup.select_one('#info .wp-content p, .description p')
-    if syn_el:
-        synopsis = syn_el.get_text(strip=True)[:500]
+    detail2 = soup.select_one('div.detail2')
+    if detail2:
+        for div in detail2.find_all('div'):
+            text_content = div.get_text(strip=True)
+            if text_content.startswith('เรื่องย่อ:'):
+                synopsis = text_content.replace('เรื่องย่อ:', '').strip()[:500]
+                break
 
-    # Get episodes from seasons section
+    # Episodes from div.ep2 > a > span.ep3
     episodes = []
-    # DooPlay uses single-quoted attributes in inline HTML
-    ep_pattern = re.compile(r"<a\s+href=['\"]([^'\"]*?/ep/[^'\"]*?)['\"]", re.I)
-    for match in ep_pattern.finditer(r.text):
-        ep_url = match.group(1)
-        ep_num_match = re.search(r'ep-?(\d+)', ep_url)
-        ep_num = ep_num_match.group(1) if ep_num_match else str(len(episodes) + 1)
-        episodes.append({
-            'number': int(ep_num),
-            'url': ep_url,
-            'slug': ep_url.rstrip('/').split('/')[-1],
-        })
-
-    # Also try season episode list
-    if not episodes:
-        for li in soup.select('#seasons .se-a li, .episodios li'):
-            a = li.select_one('a')
-            if a:
-                href = a.get('href', '')
-                ep_num_match = re.search(r'ep-?(\d+)', href)
-                ep_num = ep_num_match.group(1) if ep_num_match else str(len(episodes) + 1)
+    ep_container = soup.select_one('div.ep2')
+    if ep_container:
+        for a_tag in ep_container.find_all('a', href=True):
+            href = a_tag.get('href', '')
+            ep_id_match = re.search(r'/ep/(\d+)', href)
+            if ep_id_match:
+                ep_id = ep_id_match.group(1)
+                span = a_tag.select_one('span.ep3')
+                ep_text = span.get_text(strip=True) if span else a_tag.get_text(strip=True)
+                num_match = re.search(r'(\d+)', ep_text)
+                ep_num = int(num_match.group(1)) if num_match else len(episodes) + 1
                 episodes.append({
-                    'number': int(ep_num),
-                    'url': href,
-                    'slug': href.rstrip('/').split('/')[-1],
+                    'number': ep_num,
+                    'slug': ep_id,
+                    'title': ep_text,
                 })
 
     episodes.sort(key=lambda x: x['number'])
@@ -272,120 +288,88 @@ def animeruka_detail(slug):
     }
 
 
-def animeruka_episode(slug):
-    """Get video servers for an episode."""
-    url = f"{ANIMERUKA_BASE}/ep/{slug}/"
-    r = safe_request(url, 'animeruka')
+def animegojo_episode(ep_id):
+    """Get video for an animegojo episode. ep_id is the numeric ID from /ep/{id}/"""
+    url = f"{ANIMEGOJO_BASE}/ep/{ep_id}/"
+    r = safe_request(url, 'animegojo')
     if not r or r.status_code != 200:
         return None
 
-    # Extract post ID and player options (single-quoted in DooPlay)
-    post_id_match = re.search(r"data-post=['\"](\d+)['\"]", r.text)
-    post_id = post_id_match.group(1) if post_id_match else None
+    # Extract video key (link2) from reload() JS
+    link2_match = re.search(r'link2=([A-Za-z0-9+/=]+)', r.text)
+    link2 = link2_match.group(1) if link2_match else ''
 
-    if not post_id:
-        # Try from body class
-        body_match = re.search(r'postid-(\d+)', r.text)
-        post_id = body_match.group(1) if body_match else None
+    embed_url = ''
+    if link2:
+        embed_url = f"https://anccplayer.cyou/source/playeradsg.php?link=&link2={link2}&o=&w=mg&d="
 
-    servers = []
-    option_pattern = re.compile(
-        r"data-type=['\"]([^'\"]*)['\"][^>]*data-post=['\"](\d+)['\"][^>]*data-nume=['\"](\d+)['\"]"
-    )
-    for m in option_pattern.finditer(r.text):
-        servers.append({
-            'type': m.group(1),
-            'post_id': m.group(2),
-            'server': int(m.group(3)),
+    # Find next/prev episode links
+    soup = BeautifulSoup(r.text, 'lxml')
+    all_ep_links = []
+    ep_container = soup.select_one('div.ep2')
+    if ep_container:
+        for a_tag in ep_container.find_all('a', href=True):
+            ep_match = re.search(r'/ep/(\d+)', a_tag.get('href', ''))
+            if ep_match:
+                all_ep_links.append(ep_match.group(1))
+
+    current_idx = -1
+    for i, eid in enumerate(all_ep_links):
+        if eid == ep_id:
+            current_idx = i
+            break
+
+    next_ep = all_ep_links[current_idx + 1] if current_idx >= 0 and current_idx + 1 < len(all_ep_links) else None
+
+    videos = []
+    if embed_url:
+        videos.append({
+            'embed_url': embed_url,
+            'type': 'iframe',
+            'server': 1,
         })
 
-    # If no servers found in regex, try reverse attribute order
-    if not servers:
-        option_pattern2 = re.compile(
-            r"data-post=['\"](\d+)['\"][^>]*data-(?:type|num|nume)=['\"]([^'\"]*)['\"]"
-        )
-        for m in option_pattern2.finditer(r.text):
-            servers.append({
-                'post_id': m.group(1),
-                'server': len(servers) + 1,
-                'type': 'tv',
-            })
-
-    # Get next episode link
-    next_ep = None
-    next_match = re.search(r'<a\s+href=["\']([^"\']*?/ep/[^"\']*?)["\'][^>]*>\s*(?:<span>)?ตอนต่อไป', r.text)
-    if next_match:
-        next_url = next_match.group(1)
-        next_slug = next_url.rstrip('/').split('/')[-1]
-        next_ep = next_slug
-
-    # Get anime page link (for going back to episode list)
-    anime_link = None
-    anime_match = re.search(r'href=["\']([^"\']*?/anime/[^"\']*?)["\']', r.text)
-    if anime_match:
-        anime_link = anime_match.group(1)
-
     return {
-        'post_id': post_id,
-        'servers': servers,
+        'videos': videos,
         'next_episode': next_ep,
-        'anime_url': anime_link,
+        'servers': videos,
     }
 
 
-def animeruka_video(post_id, server=1):
-    """Get video embed URL from DooPlay API."""
-    url = f"{ANIMERUKA_API}/{post_id}/tv/{server}"
-    r = safe_request(url, 'animeruka', headers={
-        'Accept': 'application/json',
-        'Referer': f'{ANIMERUKA_BASE}/',
-    })
-    if not r:
-        return None
-    try:
-        data = r.json()
-        embed_url = data.get('embed_url', '')
-        return {
-            'embed_url': embed_url,
-            'type': data.get('type', 'iframe'),
-            'server': server,
-        }
-    except:
-        return None
-
-
-def animeruka_search(query):
-    """Search anime on animeruka via search page scraping."""
-    url = f"{ANIMERUKA_BASE}/?s={urllib.parse.quote(query)}"
-    r = safe_request(url, 'animeruka')
+def animegojo_search(query):
+    """Search anime on animegojo."""
+    url = f"{ANIMEGOJO_BASE}/search?name={urllib.parse.quote(query)}"
+    r = safe_request(url, 'animegojo')
     if not r or r.status_code != 200:
         return []
 
     soup = BeautifulSoup(r.text, 'lxml')
     results = []
 
-    for item in soup.select('.result-item'):
-        link = item.select_one('a[href*="/anime/"]')
-        if not link:
+    for a in soup.find_all('a', href=True):
+        href = a.get('href', '')
+        m = re.match(r'^/list/(\d+)/(.+?)/?$', href)
+        if not m:
             continue
-        href = link.get('href', '')
-        slug = href.rstrip('/').split('/')[-1]
-        if not slug:
+        item_id = m.group(1)
+        item_slug = m.group(2)
+        text = a.get_text(strip=True)
+        if not text or len(text) < 3:
             continue
 
-        title_el = item.select_one('.title a')
-        title = title_el.get_text(strip=True) if title_el else slug
+        title = text
+        ep_match = re.search(r'(EP\s*[\d\-]+)', text)
+        if ep_match:
+            title = text[:ep_match.start()].strip()
 
-        img = item.select_one('img')
-        image = ''
-        if img:
-            image = img.get('src', '') or img.get('data-src', '')
+        combined_slug = f"{item_id}---{item_slug}"
+        image = f"{ANIMEGOJO_BASE}/img/{item_id}-{item_slug}.webp"
 
-        if slug not in [r['slug'] for r in results]:
+        if combined_slug not in [r_item['slug'] for r_item in results]:
             results.append({
                 'title': title,
-                'slug': slug,
-                'url': href,
+                'slug': combined_slug,
+                'url': f"{ANIMEGOJO_BASE}{href}",
                 'image': image,
             })
 
@@ -420,8 +404,6 @@ def seriesdays_catalog(page=1, category='all'):
     soup = BeautifulSoup(r.text, 'lxml')
     items = []
 
-    # Custom Halim theme: <div class="box"><a href><div class="box-img"><img data-lazy-src>
-    # <div class="p-box"><div class="p1">ซับไทย</div><div class="p2">Title</div></div></a></div>
     for box in soup.select('div.box'):
         link = box.select_one('a[href]')
         if not link:
@@ -457,7 +439,6 @@ def seriesdays_catalog(page=1, category='all'):
             'status': ep_status,
         })
 
-    # Deduplicate
     seen = set()
     unique_items = []
     for it in items:
@@ -480,7 +461,6 @@ def seriesdays_detail(slug):
 
     soup = BeautifulSoup(r.text, 'lxml')
 
-    # Use og:title for correct title (h1 is site title on Halim theme)
     title = ''
     og_title = soup.select_one('meta[property="og:title"]')
     if og_title:
@@ -490,7 +470,6 @@ def seriesdays_detail(slug):
         if title_tag:
             title = title_tag.get_text(strip=True).split(' - ')[0].split(' | ')[0].strip()
 
-    # Use og:image for poster
     poster = ''
     og_img = soup.select_one('meta[property="og:image"]')
     if og_img:
@@ -505,7 +484,6 @@ def seriesdays_detail(slug):
     if syn_el:
         synopsis = syn_el.get_text(strip=True)[:500]
 
-    # Get post ID from halim_cfg
     post_id = None
     cfg_match = re.search(r'"post_id"\s*:\s*(\d+)', r.text)
     if cfg_match:
@@ -515,25 +493,17 @@ def seriesdays_detail(slug):
         if btn:
             post_id = btn.get('data-post-id')
 
-    # Discover episode count from the page
     max_ep = 0
-
-    # Method 1: Look for ep-N links in the HTML
     ep_nums_from_links = re.findall(re.escape(slug) + r'-ep-?(\d+)', r.text)
     if ep_nums_from_links:
         max_ep = max(int(n) for n in ep_nums_from_links)
-
-    # Method 2: Look for episode number text patterns
     if max_ep == 0:
         ep_text_nums = re.findall(r'(?:EP|ตอนที่|ตอน)\s*[.\s]*(\d+)', r.text, re.I)
         if ep_text_nums:
             max_ep = max(int(n) for n in ep_text_nums)
-
-    # Method 3: Default 1 episode
     if max_ep == 0:
         max_ep = 1
 
-    # Generate episodes using post_id-ep-N pattern
     episodes = []
     if post_id:
         for n in range(1, max_ep + 1):
@@ -556,16 +526,12 @@ def seriesdays_detail(slug):
 
 
 def seriesdays_episode_video(slug):
-    """Get video for a series-days episode.
-    Slug format: {post_id}-ep-{episode_number}
-    """
-    # Parse post_id and episode from slug
+    """Get video for a series-days episode. Slug format: {post_id}-ep-{N}"""
     ep_match = re.match(r'(\d+)-ep-(\d+)', slug)
     if ep_match:
         post_id = ep_match.group(1)
         episode = ep_match.group(2)
     else:
-        # Fallback: try loading the page
         url = f"{SERIESDAYS_BASE}/{slug}/"
         r = safe_request(url, 'seriesdays')
         if not r or r.status_code != 200:
@@ -576,14 +542,12 @@ def seriesdays_episode_video(slug):
         if not post_id:
             return None
 
-    # Get video from all servers
     servers = []
     for server_num in range(1, 4):
         result = _halim_get_video(SERIESDAYS_API, post_id, episode, server_num, SERIESDAYS_BASE, slug)
         if result:
             servers.append(result)
 
-    # Calculate next episode slug
     ep_num = int(episode)
     next_ep = f'{post_id}-ep-{ep_num + 1}'
 
@@ -638,7 +602,6 @@ def hdmovie_catalog(page=1, category='all'):
     soup = BeautifulSoup(r.text, 'lxml')
     items = []
 
-    # Same box structure as series-days
     for box in soup.select('div.box'):
         link = box.select_one('a[href]')
         if not link:
@@ -692,7 +655,6 @@ def hdmovie_detail(slug):
 
     soup = BeautifulSoup(r.text, 'lxml')
 
-    # Use og:title for correct title
     title = ''
     og_title = soup.select_one('meta[property="og:title"]')
     if og_title:
@@ -702,7 +664,6 @@ def hdmovie_detail(slug):
         if title_tag:
             title = title_tag.get_text(strip=True).split(' - ')[0].split(' | ')[0].strip()
 
-    # Use og:image for poster
     poster = ''
     og_img = soup.select_one('meta[property="og:image"]')
     if og_img:
@@ -717,7 +678,6 @@ def hdmovie_detail(slug):
     if syn_el:
         synopsis = syn_el.get_text(strip=True)[:500]
 
-    # Get post ID from halim_cfg
     post_id = None
     cfg_match = re.search(r'"post_id"\s*:\s*(\d+)', r.text)
     if cfg_match:
@@ -727,7 +687,6 @@ def hdmovie_detail(slug):
         if btn:
             post_id = btn.get('data-post-id')
 
-    # Discover episode count
     max_ep = 0
     ep_nums_from_links = re.findall(re.escape(slug) + r'-ep-?(\d+)', r.text)
     if ep_nums_from_links:
@@ -739,7 +698,6 @@ def hdmovie_detail(slug):
     if max_ep == 0:
         max_ep = 1
 
-    # Generate episodes using post_id-ep-N pattern
     episodes = []
     if post_id:
         for n in range(1, max_ep + 1):
@@ -764,6 +722,279 @@ def hdmovie_detail(slug):
 def hdmovie_get_video(post_id, episode=1, server=1):
     """Get video URL from 24-hdmovie external API."""
     return _halim_get_video(HDMOVIE_API, post_id, episode, server, HDMOVIE_BASE)
+
+
+# ============================================================
+# WOW-DRAMA.COM SCRAPER (WordPress + Miru Player)
+# ============================================================
+WOWDRAMA_BASE = 'https://wow-drama.com'
+WOWDRAMA_AJAX = f'{WOWDRAMA_BASE}/wp-admin/admin-ajax.php'
+
+WOWDRAMA_CATEGORIES = {
+    'all': '/category/the-series-all/',
+    'ซีรี่ย์มาใหม่': '/category/new-online-todays/',
+    'ซีรี่ย์จีน': '/category/doo-free-24/',
+    'ซีรี่ย์เกาหลี': '/category/series-korea/',
+    'ซีรี่ย์ญี่ปุ่น': '/category/japan-series/',
+    'ซีรี่ย์ไทย': '/category/the-series-th/',
+}
+
+def wowdrama_catalog(page=1, category='all'):
+    """Get drama catalog from wow-drama."""
+    cat_path = WOWDRAMA_CATEGORIES.get(category, '/category/the-series-all/')
+    if page > 1:
+        url = f"{WOWDRAMA_BASE}{cat_path}page/{page}/"
+    else:
+        url = f"{WOWDRAMA_BASE}{cat_path}"
+    r = safe_request(url, 'wowdrama')
+    if not r or r.status_code != 200:
+        return {'items': [], 'page': page, 'has_next': False}
+
+    soup = BeautifulSoup(r.text, 'lxml')
+    items = []
+
+    for movie_div in soup.select('div.-movie'):
+        pic_link = movie_div.select_one('div.pic a[href]')
+        info_link = movie_div.select_one('h2.entry-title a[href]')
+        link = info_link or pic_link
+        if not link:
+            continue
+
+        href = link.get('href', '')
+        if 'wow-drama.com' not in href:
+            continue
+
+        slug = href.rstrip('/').split('/')[-1]
+        if not slug:
+            continue
+
+        title = ''
+        if info_link:
+            title = info_link.get_text(strip=True)
+        if not title:
+            img = movie_div.select_one('img')
+            if img:
+                title = img.get('alt', slug)
+
+        image = ''
+        img = movie_div.select_one('img')
+        if img:
+            image = img.get('src', '') or img.get('data-src', '')
+
+        quality = ''
+        qa_label = movie_div.select_one('.qa-label')
+        if qa_label:
+            quality = qa_label.get_text(strip=True)
+
+        lang_el = movie_div.select_one('.imdb')
+        lang = lang_el.get_text(strip=True) if lang_el else ''
+        if lang:
+            quality = f"{quality} {lang}".strip()
+
+        ep_el = movie_div.select_one('.epseries')
+        ep_status = ep_el.get_text(strip=True) if ep_el else ''
+
+        items.append({
+            'title': title,
+            'slug': slug,
+            'url': href,
+            'image': image,
+            'quality': quality,
+            'status': ep_status,
+        })
+
+    seen = set()
+    unique_items = []
+    for it in items:
+        if it['slug'] not in seen:
+            seen.add(it['slug'])
+            unique_items.append(it)
+    items = unique_items
+
+    has_next = bool(re.search(rf'page/{page + 1}/', r.text))
+
+    return {'items': items, 'page': page, 'has_next': has_next}
+
+
+def wowdrama_detail(slug):
+    """Get drama detail with episode list."""
+    url = f"{WOWDRAMA_BASE}/{slug}/"
+    r = safe_request(url, 'wowdrama')
+    if not r or r.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(r.text, 'lxml')
+
+    title = ''
+    og_title = soup.select_one('meta[property="og:title"]')
+    if og_title:
+        title = og_title.get('content', '').strip()
+    if not title:
+        title_tag = soup.select_one('title')
+        if title_tag:
+            title = title_tag.get_text(strip=True).split(' - ')[0].split(' | ')[0].strip()
+
+    poster = ''
+    og_img = soup.select_one('meta[property="og:image"]')
+    if og_img:
+        poster = og_img.get('content', '').strip()
+
+    synopsis = ''
+    content_div = soup.select_one('.entry-content, .post-content, article')
+    if content_div:
+        for p in content_div.find_all('p'):
+            text_content = p.get_text(strip=True)
+            if len(text_content) > 50 and 'wow-drama' not in text_content.lower():
+                synopsis = text_content[:500]
+                break
+
+    post_id = None
+    body = soup.find('body')
+    if body:
+        body_class = ' '.join(body.get('class', []))
+        pid_match = re.search(r'postid-(\d+)', body_class)
+        if pid_match:
+            post_id = pid_match.group(1)
+
+    episodes = []
+    ep_list = soup.select_one('div.mp-ep-list')
+    if ep_list:
+        for btn in ep_list.select('button.mp-ep-btn'):
+            data_id = btn.get('data-id', '')
+            if not data_id:
+                continue
+            ep_text = btn.get_text(strip=True)
+            num_match = re.search(r'(\d+)', ep_text)
+            ep_num = int(num_match.group(1)) if num_match else len(episodes) + 1
+            episodes.append({
+                'number': ep_num,
+                'slug': data_id,
+                'title': ep_text.strip(),
+            })
+
+    episodes.sort(key=lambda x: x['number'])
+
+    return {
+        'title': title,
+        'slug': slug,
+        'poster': poster,
+        'synopsis': synopsis,
+        'post_id': post_id,
+        'episodes': episodes,
+        'episode_count': len(episodes),
+    }
+
+
+def wowdrama_episode(data_id):
+    """Get video for a wow-drama episode via AJAX.
+    data_id is the post_id from button.mp-ep-btn data-id attribute.
+    """
+    r = safe_request(WOWDRAMA_AJAX, 'wowdrama', method='POST', data={
+        'action': 'miru_custom_player',
+        'post_id': data_id,
+    }, headers={
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': f'{WOWDRAMA_BASE}/',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    })
+    if not r or r.status_code != 200 or r.text.strip() == 'error':
+        return None
+
+    videos = []
+    soup = BeautifulSoup(r.text, 'lxml')
+
+    # Main iframe
+    iframe = soup.select_one('iframe[src]')
+    if iframe:
+        embed_url = iframe.get('src', '')
+        if embed_url:
+            video_info = _extract_topcdn_video(embed_url)
+            if video_info:
+                videos.append(video_info)
+            else:
+                videos.append({
+                    'embed_url': embed_url,
+                    'type': 'iframe',
+                    'server': 1,
+                })
+
+    # Alternative servers from data attributes or additional links
+    for i, sl in enumerate(soup.select('[data-id]')):
+        sl_url = sl.get('data-id', '')
+        if sl_url and sl_url.startswith('http') and sl_url not in [v.get('embed_url', '') for v in videos]:
+            video_info = _extract_topcdn_video(sl_url)
+            if video_info:
+                video_info['server'] = i + 2
+                videos.append(video_info)
+            else:
+                videos.append({
+                    'embed_url': sl_url,
+                    'type': 'iframe',
+                    'server': i + 2,
+                })
+
+    return {
+        'videos': videos,
+        'servers': videos,
+        'next_episode': None,
+    }
+
+
+def _extract_topcdn_video(embed_url):
+    """Extract HLS video URL from top-cdn.com or ok-hd.com embed."""
+    if 'top-cdn.com/play/' not in embed_url and 'ok-hd.com/play/' not in embed_url:
+        return None
+
+    hash_match = re.search(r'/play/([a-f0-9]+)', embed_url)
+    if not hash_match:
+        return None
+    video_hash = hash_match.group(1)
+
+    if 'ok-hd.com' in embed_url:
+        cdn_base = 'https://ok-hd.com'
+    else:
+        cdn_base = 'https://top-cdn.com'
+
+    m3u8_url = f'{cdn_base}/hls/{video_hash}/master.m3u8'
+
+    return {
+        'video_id': video_hash,
+        'embed_url': embed_url,
+        'm3u8_url': m3u8_url,
+        'type': 'hls',
+        'server': 1,
+        'cdn_base': cdn_base,
+    }
+
+
+def wowdrama_search(query):
+    """Search drama on wow-drama via WP REST API."""
+    url = f"{WOWDRAMA_BASE}/wp-json/wp/v2/posts?search={urllib.parse.quote(query)}&per_page=20"
+    r = safe_request(url, 'wowdrama', headers={'Accept': 'application/json'})
+    if not r or r.status_code != 200:
+        return []
+    try:
+        posts = r.json()
+        results = []
+        for post in posts:
+            slug = post.get('slug', '')
+            if not slug:
+                continue
+            title = post.get('title', {}).get('rendered', slug)
+            title = re.sub(r'<[^>]+>', '', title).strip()
+            image = ''
+            if post.get('_embedded', {}).get('wp:featuredmedia'):
+                media = post['_embedded']['wp:featuredmedia'][0]
+                image = media.get('source_url', '')
+            results.append({
+                'title': title,
+                'slug': slug,
+                'url': post.get('link', f'{WOWDRAMA_BASE}/{slug}/'),
+                'image': image,
+            })
+        return results
+    except:
+        return []
 
 
 # ============================================================
@@ -794,21 +1025,18 @@ def _halim_get_video(api_url, post_id, episode, server, referer_base, slug=''):
     if 'ไม่พบ' in text or text == 'Error' or not text:
         return None
 
-    # Extract iframe src
     iframe_match = re.search(r'src="([^"]+)"', text)
     if not iframe_match:
         return None
 
     embed_url = iframe_match.group(1)
 
-    # Extract video ID from embed URL
     id_match = re.search(r'[?&]id=([^&]+)', embed_url)
     if not id_match:
         return {'embed_url': embed_url, 'type': 'iframe', 'server': server}
 
     video_id = id_match.group(1)
 
-    # Determine m3u8 path based on player URL
     if 'index_g' in embed_url:
         m3u8_path = f'/newplaylist_g/{video_id}/{video_id}.m3u8'
     else:
@@ -824,7 +1052,7 @@ def _halim_get_video(api_url, post_id, episode, server, referer_base, slug=''):
 
 
 def get_hls_master(video_id, backup=False):
-    """Get master m3u8 playlist and rewrite URLs for proxying."""
+    """Get master m3u8 playlist from 24playerhd and rewrite URLs for proxying."""
     prefix = 'newplaylist_g' if backup else 'newplaylist'
     url = f'{PLAYER_BASE}/{prefix}/{video_id}/{video_id}.m3u8'
     r = safe_request(url, 'hls', headers={
@@ -833,14 +1061,12 @@ def get_hls_master(video_id, backup=False):
     if not r or r.status_code != 200:
         return None
 
-    # Rewrite quality variant URLs to proxy through us
     lines = r.text.strip().split('\n')
     rewritten = []
     for line in lines:
         if line.startswith('#'):
             rewritten.append(line)
         elif line.strip():
-            # e.g. /m3u8/{id}/{id}438.m3u8
             variant_match = re.search(r'/m3u8(?:_g)?/([^/]+)/([^/]+\.m3u8)', line.strip())
             if variant_match:
                 variant_path = line.strip()
@@ -852,14 +1078,46 @@ def get_hls_master(video_id, backup=False):
     return '\n'.join(rewritten) + '\n'
 
 
-def get_hls_variant(variant_url):
-    """Get variant m3u8 and rewrite segment URLs for proxying."""
-    r = safe_request(variant_url, 'hls', headers={
-        'Referer': f'{PLAYER_BASE}/',
+def get_generic_hls_master(m3u8_url, referer=''):
+    """Get master m3u8 from any URL and rewrite for proxying."""
+    r = safe_request(m3u8_url, 'hls', headers={
+        'Referer': referer or m3u8_url.split('/hls/')[0] + '/',
     })
     if not r or r.status_code != 200:
         return None
 
+    base_url = m3u8_url.rsplit('/', 1)[0]
+    lines = r.text.strip().split('\n')
+    rewritten = []
+    for line in lines:
+        if line.startswith('#'):
+            rewritten.append(line)
+        elif line.strip():
+            variant_url = line.strip()
+            if not variant_url.startswith('http'):
+                variant_url = f'{base_url}/{variant_url}'
+            encoded = encode_url(variant_url)
+            rewritten.append(f'/hls/variant/{encoded}')
+
+    return '\n'.join(rewritten) + '\n'
+
+
+def get_hls_variant(variant_url):
+    """Get variant m3u8 and rewrite segment URLs for proxying."""
+    # Determine referer from URL
+    referer = f'{PLAYER_BASE}/'
+    if 'top-cdn.com' in variant_url:
+        referer = 'https://top-cdn.com/'
+    elif 'ok-hd.com' in variant_url:
+        referer = 'https://ok-hd.com/'
+
+    r = safe_request(variant_url, 'hls', headers={
+        'Referer': referer,
+    })
+    if not r or r.status_code != 200:
+        return None
+
+    base_url = variant_url.rsplit('/', 1)[0]
     lines = r.text.strip().split('\n')
     rewritten = []
     for line in lines:
@@ -868,9 +1126,7 @@ def get_hls_variant(variant_url):
         elif line.strip():
             seg_url = line.strip()
             if not seg_url.startswith('http'):
-                # Relative URL - make absolute
-                base = variant_url.rsplit('/', 1)[0]
-                seg_url = f'{base}/{seg_url}'
+                seg_url = f'{base_url}/{seg_url}'
             encoded = encode_url(seg_url)
             rewritten.append(f'/hls/segment/{encoded}')
 
@@ -891,11 +1147,11 @@ def api_sources():
     return jsonify({
         'sources': [
             {
-                'id': 'animeruka',
-                'name': 'AnimeRuka',
+                'id': 'animegojo',
+                'name': 'AnimeGojo',
                 'description': 'อนิเมะ ซับไทย/พากย์ไทย',
                 'icon': '🎌',
-                'categories': list(ANIMERUKA_CATEGORIES.keys()),
+                'categories': list(ANIMEGOJO_CATEGORIES.keys()),
                 'type': 'anime',
             },
             {
@@ -914,6 +1170,14 @@ def api_sources():
                 'categories': list(HDMOVIE_CATEGORIES.keys()),
                 'type': 'movie',
             },
+            {
+                'id': 'wowdrama',
+                'name': 'WowDrama',
+                'description': 'ซีรี่ย์จีน เกาหลี ญี่ปุ่น ไทย ซับไทย/พากย์ไทย',
+                'icon': '🌟',
+                'categories': list(WOWDRAMA_CATEGORIES.keys()),
+                'type': 'drama',
+            },
         ]
     })
 
@@ -923,23 +1187,27 @@ def api_catalog(source):
     page = int(request.args.get('page', 1))
     category = request.args.get('category', 'all')
 
-    if source == 'animeruka':
-        return jsonify(animeruka_catalog(page, category))
+    if source == 'animegojo':
+        return jsonify(animegojo_catalog(page, category))
     elif source == 'seriesdays':
         return jsonify(seriesdays_catalog(page, category))
     elif source == 'hdmovie':
         return jsonify(hdmovie_catalog(page, category))
+    elif source == 'wowdrama':
+        return jsonify(wowdrama_catalog(page, category))
     return jsonify({'error': 'Unknown source'}), 404
 
 
-@app.route('/api/detail/<source>/<slug>')
+@app.route('/api/detail/<source>/<path:slug>')
 def api_detail(source, slug):
-    if source == 'animeruka':
-        result = animeruka_detail(slug)
+    if source == 'animegojo':
+        result = animegojo_detail(slug)
     elif source == 'seriesdays':
         result = seriesdays_detail(slug)
     elif source == 'hdmovie':
         result = hdmovie_detail(slug)
+    elif source == 'wowdrama':
+        result = wowdrama_detail(slug)
     else:
         return jsonify({'error': 'Unknown source'}), 404
 
@@ -948,29 +1216,23 @@ def api_detail(source, slug):
     return jsonify(result)
 
 
-@app.route('/api/episode/<source>/<slug>')
+@app.route('/api/episode/<source>/<path:slug>')
 def api_episode(source, slug):
     """Get video servers for a specific episode."""
-    if source == 'animeruka':
-        result = animeruka_episode(slug)
-        if result and result.get('servers'):
-            # For each server, get the embed URL
-            videos = []
-            for srv in result['servers'][:3]:  # Max 3 servers
-                video = animeruka_video(srv['post_id'], srv['server'])
-                if video:
-                    videos.append(video)
-            result['videos'] = videos
+    if source == 'animegojo':
+        result = animegojo_episode(slug)
+        return jsonify(result) if result else (jsonify({'error': 'Not found'}), 404)
+
+    elif source == 'wowdrama':
+        result = wowdrama_episode(slug)
         return jsonify(result) if result else (jsonify({'error': 'Not found'}), 404)
 
     elif source in ('seriesdays', 'hdmovie'):
-        # Both Halim sites use {post_id}-ep-{N} slug format
         ep_match = re.match(r'(\d+)-ep-(\d+)', slug)
         if ep_match:
             post_id = ep_match.group(1)
             episode = ep_match.group(2)
         else:
-            # Fallback for old-style slugs
             post_id = slug
             episode = '1'
 
@@ -1003,12 +1265,18 @@ def api_video(source, post_id, server):
     """Get video URL for a specific server."""
     episode = int(request.args.get('episode', 1))
 
-    if source == 'animeruka':
-        result = animeruka_video(post_id, server)
+    if source == 'animegojo':
+        return jsonify({'error': 'Use episode endpoint'}), 400
     elif source == 'seriesdays':
         result = seriesdays_get_video(post_id, episode, server)
     elif source == 'hdmovie':
         result = hdmovie_get_video(post_id, episode, server)
+    elif source == 'wowdrama':
+        result = wowdrama_episode(post_id)
+        if result and result.get('videos'):
+            result = result['videos'][0] if result['videos'] else None
+        else:
+            result = None
     else:
         return jsonify({'error': 'Unknown source'}), 404
 
@@ -1023,13 +1291,14 @@ def api_search(source):
     if not query:
         return jsonify([])
 
-    if source == 'animeruka':
-        return jsonify(animeruka_search(query))
+    if source == 'animegojo':
+        return jsonify(animegojo_search(query))
     elif source == 'seriesdays':
-        # Use WP REST API for search (standard search returns empty)
         return jsonify(_search_wp_api(SERIESDAYS_BASE, query, 'seriesdays'))
     elif source == 'hdmovie':
         return jsonify(_search_halim(HDMOVIE_BASE, query, 'hdmovie'))
+    elif source == 'wowdrama':
+        return jsonify(wowdrama_search(query))
     return jsonify([])
 
 
@@ -1047,9 +1316,7 @@ def _search_wp_api(base_url, query, site_key):
             if not slug:
                 continue
             title = post.get('title', {}).get('rendered', slug)
-            # Clean HTML from title
             title = re.sub(r'<[^>]+>', '', title).strip()
-            # Get featured image
             image = ''
             if post.get('_embedded', {}).get('wp:featuredmedia'):
                 media = post['_embedded']['wp:featuredmedia'][0]
@@ -1075,7 +1342,6 @@ def _search_halim(base_url, query, site_key):
     soup = BeautifulSoup(r.text, 'lxml')
     results = []
 
-    # Try div.box selectors first (custom Halim layout)
     for box in soup.select('div.box'):
         link = box.select_one('a[href]')
         if not link:
@@ -1100,7 +1366,6 @@ def _search_halim(base_url, query, site_key):
             'image': image,
         })
 
-    # Fallback to standard Halim selectors
     if not results:
         for article in soup.select('.halim-item, article.item, .halim_box, .search-item'):
             link = article.select_one('a[href]')
@@ -1121,13 +1386,12 @@ def _search_halim(base_url, query, site_key):
                     'image': image,
                 })
 
-    # Deduplicate
     seen = set()
     unique = []
-    for r in results:
-        if r['slug'] not in seen:
-            seen.add(r['slug'])
-            unique.append(r)
+    for r_item in results:
+        if r_item['slug'] not in seen:
+            seen.add(r_item['slug'])
+            unique.append(r_item)
     return unique
 
 
@@ -1137,9 +1401,21 @@ def _search_halim(base_url, query, site_key):
 
 @app.route('/hls/master/<video_id>')
 def hls_master(video_id):
-    """Proxy master m3u8 playlist."""
+    """Proxy master m3u8 playlist (24playerhd)."""
     backup = request.args.get('backup', '0') == '1'
     content = get_hls_master(video_id, backup)
+    if content is None:
+        return 'Not found', 404
+    return Response(content, content_type='application/vnd.apple.mpegurl',
+                    headers={'Access-Control-Allow-Origin': '*'})
+
+
+@app.route('/hls/topcdn/<hash_id>')
+def hls_topcdn(hash_id):
+    """Proxy master m3u8 from top-cdn.com or ok-hd.com."""
+    cdn = request.args.get('cdn', 'top-cdn.com')
+    m3u8_url = f'https://{cdn}/hls/{hash_id}/master.m3u8'
+    content = get_generic_hls_master(m3u8_url, f'https://{cdn}/')
     if content is None:
         return 'Not found', 404
     return Response(content, content_type='application/vnd.apple.mpegurl',
@@ -1166,8 +1442,15 @@ def hls_segment(encoded_url):
     if not url:
         return 'Invalid URL', 400
 
+    # Determine referer from URL
+    referer = f'{PLAYER_BASE}/'
+    if 'top-cdn.com' in url:
+        referer = 'https://top-cdn.com/'
+    elif 'ok-hd.com' in url:
+        referer = 'https://ok-hd.com/'
+
     r = safe_request(url, 'hls', headers={
-        'Referer': f'{PLAYER_BASE}/',
+        'Referer': referer,
     }, stream=True)
     if not r or r.status_code != 200:
         return 'Segment not found', 404
@@ -1196,21 +1479,21 @@ def proxy_image():
     if not url:
         return 'No URL', 400
 
-    # Determine referer based on URL
     referer = ''
-    if 'animeruka' in url:
-        referer = ANIMERUKA_BASE
+    if 'animegojo' in url:
+        referer = ANIMEGOJO_BASE
     elif 'series-days' in url:
         referer = SERIESDAYS_BASE
     elif '24-hdmovie' in url:
         referer = HDMOVIE_BASE
+    elif 'wow-drama' in url:
+        referer = WOWDRAMA_BASE
 
     r = safe_request(url, 'images', headers={
-        'Referer': referer + '/',
+        'Referer': referer + '/' if referer else '',
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     })
     if not r or r.status_code != 200:
-        # Return 1x1 transparent pixel
         return Response(
             b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n\xb4\x00\x00\x00\x00IEND\xaeB`\x82',
             content_type='image/png'
@@ -1265,7 +1548,7 @@ if __name__ == '__main__':
     print("=" * 60)
     print(f"  PC:     http://localhost:5555")
     print(f"  Mobile: http://{local_ip}:5555")
-    print(f"  Sources: AnimeRuka | Series-Days | 24-HDMovie")
+    print(f"  Sources: AnimeGojo | Series-Days | 24-HDMovie | WowDrama")
     print("=" * 60)
 
     send_telegram(f"🎬 Server started\nPC: http://localhost:5555\nMobile: http://{local_ip}:5555")
