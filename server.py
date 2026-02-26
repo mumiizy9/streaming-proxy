@@ -15,10 +15,11 @@ from bs4 import BeautifulSoup
 try:
     from curl_cffi import requests as cf_requests
     HAS_CURL_CFFI = True
-    print('[OK] curl_cffi loaded - enhanced Cloudflare bypass enabled')
-except ImportError:
+    print(f'[OK] curl_cffi v{cf_requests.__version__ if hasattr(cf_requests, "__version__") else "?"} loaded')
+except Exception as e:
     HAS_CURL_CFFI = False
-    print('[WARN] curl_cffi not available - using cloudscraper only')
+    cf_requests = None
+    print(f'[WARN] curl_cffi not available: {e} - using cloudscraper only')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('streamhub')
@@ -131,25 +132,21 @@ def safe_request(url, site_key='default', method='GET', data=None, headers=None,
         h.update(headers)
 
     # ---- Layer 1: curl_cffi with Chrome TLS fingerprint (best for data center IPs) ----
-    if HAS_CURL_CFFI:
-        for browser in ['chrome', 'chrome110', 'chrome120']:
-            try:
-                if method == 'POST':
-                    r = cf_requests.post(url, data=data, headers=h, timeout=timeout,
-                                         impersonate=browser, verify=False)
-                else:
-                    r = cf_requests.get(url, headers=h, timeout=timeout,
-                                        impersonate=browser, verify=False)
-                if r.status_code == 200:
-                    return r
-                elif r.status_code == 403:
-                    log.warning(f'[curl_cffi/{browser}] 403 from {url}, trying next...')
-                    continue
-                else:
-                    return r  # Return non-403 errors as-is
-            except Exception as e:
-                log.warning(f'[curl_cffi/{browser}] Error {url}: {e}')
-                continue
+    if HAS_CURL_CFFI and cf_requests:
+        try:
+            if method == 'POST':
+                r = cf_requests.post(url, data=data, headers=h, timeout=timeout,
+                                     impersonate='chrome', verify=False, allow_redirects=True)
+            else:
+                r = cf_requests.get(url, headers=h, timeout=timeout,
+                                    impersonate='chrome', verify=False, allow_redirects=True)
+            if r.status_code == 200:
+                log.info(f'[curl_cffi] OK {url} ({len(r.content)} bytes)')
+                return r
+            else:
+                log.warning(f'[curl_cffi] Status {r.status_code} from {url}')
+        except Exception as e:
+            log.warning(f'[curl_cffi] Error {url}: {e}')
 
     # ---- Layer 2: cloudscraper (JS challenge solver) ----
     s = get_scraper(site_key)
