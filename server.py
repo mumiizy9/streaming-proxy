@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Multi-Source Streaming Proxy Server
-Sources: animegojo.com, series-days.com, 24-hdmovie.com, wow-drama.com
-Features: HLS proxy, privacy protection, auto-next, stall recovery
+Sources: animegojo.com, series-days.com, 24-hdmovie.com, wow-drama.com, k35tanmai.com, anifume.com
+Features: HLS proxy, privacy protection, auto-next, stall recovery, language filter (พากย์ไทย/ซับไทย)
 """
 
 import os, re, json, time, random, hashlib, threading, urllib.parse, base64
@@ -996,6 +996,573 @@ def wowdrama_search(query):
 
 
 # ============================================================
+# K35TANMAI.COM SCRAPER (WordPress + Elementor)
+# ============================================================
+K35TANMAI_BASE = 'https://k35tanmai.com'
+
+K35TANMAI_CATEGORIES = {
+    'all': '/',
+    'พากย์ไทย': '/%e0%b8%ad%e0%b8%99%e0%b8%b4%e0%b9%80%e0%b8%a1%e0%b8%b0%e0%b8%9e%e0%b8%b2%e0%b8%81%e0%b8%a2%e0%b9%8c%e0%b9%84%e0%b8%97%e0%b8%a2/',
+    'ซับไทย': '/%e0%b8%ad%e0%b8%99%e0%b8%b4%e0%b9%80%e0%b8%a1%e0%b8%b0%e0%b8%8b%e0%b8%b1%e0%b8%9a%e0%b9%84%e0%b8%97%e0%b8%a2/',
+    'มาใหม่': '/%e0%b8%ad%e0%b8%99%e0%b8%b4%e0%b9%80%e0%b8%a1%e0%b8%b0%e0%b8%a1%e0%b8%b2%e0%b9%83%e0%b8%ab%e0%b8%a1%e0%b9%88/',
+    'Fantasy': '/fantasy/',
+    'Action': '/action/',
+    'Romance': '/romance/',
+    'Isekai': '/isekai/',
+    'อนิเมะจีน': '/cn-anime/',
+    'Movie': '/movie/',
+}
+
+
+def k35tanmai_catalog(page=1, category='all'):
+    """Get anime catalog from k35tanmai."""
+    cat_path = K35TANMAI_CATEGORIES.get(category, '/')
+    if page > 1:
+        url = f"{K35TANMAI_BASE}{cat_path}page/{page}/"
+    else:
+        url = f"{K35TANMAI_BASE}{cat_path}"
+
+    r = safe_request(url, 'k35tanmai')
+    if not r or r.status_code != 200:
+        return {'items': [], 'page': page, 'has_next': False}
+
+    soup = BeautifulSoup(r.text, 'lxml')
+    items = []
+
+    for item_el in soup.select('div.e-loop-item'):
+        link = item_el.select_one('a[href]')
+        if not link:
+            continue
+        href = link.get('href', '')
+        if 'k35tanmai.com' not in href:
+            continue
+
+        slug = href.rstrip('/').split('/')[-1]
+        if not slug:
+            continue
+
+        img = item_el.select_one('img')
+        image = ''
+        if img:
+            image = img.get('src', '') or img.get('data-src', '')
+
+        title = ''
+        for heading in item_el.select('.elementor-heading-title'):
+            a_tag = heading.select_one('a[href]')
+            if a_tag and 'k35tanmai.com' in a_tag.get('href', ''):
+                title = a_tag.get_text(strip=True)
+                break
+        if not title and img:
+            title = img.get('alt', slug)
+
+        lang = ''
+        full_text = item_el.get_text()
+        if 'พากย์ไทย' in full_text:
+            lang = 'พากย์ไทย'
+        elif 'ซับไทย' in full_text:
+            lang = 'ซับไทย'
+        elif 'Soundtrack' in full_text:
+            lang = 'Soundtrack'
+
+        items.append({
+            'title': title,
+            'slug': slug,
+            'url': href,
+            'image': image,
+            'quality': lang,
+        })
+
+    seen = set()
+    unique = []
+    for it in items:
+        if it['slug'] not in seen:
+            seen.add(it['slug'])
+            unique.append(it)
+    items = unique
+
+    has_next = bool(soup.select_one('a.next.page-numbers') or re.search(rf'page/{page + 1}/', r.text))
+    return {'items': items, 'page': page, 'has_next': has_next}
+
+
+def k35tanmai_detail(slug):
+    """Get anime detail from k35tanmai."""
+    url = f"{K35TANMAI_BASE}/{slug}/"
+    r = safe_request(url, 'k35tanmai')
+    if not r or r.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(r.text, 'lxml')
+
+    title = ''
+    og_title = soup.select_one('meta[property="og:title"]')
+    if og_title:
+        title = og_title.get('content', '').strip()
+    if not title:
+        h1 = soup.select_one('h1')
+        if h1:
+            title = h1.get_text(strip=True)
+
+    poster = ''
+    og_img = soup.select_one('meta[property="og:image"]')
+    if og_img:
+        poster = og_img.get('content', '').strip()
+
+    synopsis = ''
+    for p in soup.select('.elementor-widget-theme-post-content p, .entry-content p'):
+        text = p.get_text(strip=True)
+        if len(text) > 50 and 'k35tanmai' not in text.lower():
+            synopsis = text[:500]
+            break
+
+    lang = ''
+    page_text = soup.get_text()
+    if 'พากย์ไทย' in page_text:
+        lang = 'พากย์ไทย'
+    elif 'ซับไทย' in page_text:
+        lang = 'ซับไทย'
+
+    episodes = [{
+        'number': 1,
+        'slug': slug,
+        'title': 'เล่นเลย',
+    }]
+
+    return {
+        'title': title,
+        'slug': slug,
+        'poster': poster,
+        'synopsis': synopsis,
+        'language': lang,
+        'episodes': episodes,
+        'episode_count': 1,
+    }
+
+
+def k35tanmai_episode(slug):
+    """Get video for a k35tanmai page. Extracts m3u8 from LiteSpeed JS bundle or inline scripts."""
+    url = f"{K35TANMAI_BASE}/{slug}/"
+    r = safe_request(url, 'k35tanmai')
+    if not r or r.status_code != 200:
+        return None
+
+    videos = []
+    soup = BeautifulSoup(r.text, 'lxml')
+    page_text = r.text
+
+    # 1) Check inline scripts for m3u8/mp4 URLs and iframes
+    for script in soup.select('script'):
+        script_text = script.string or ''
+        # m3u8/mp4 URLs
+        for m in re.finditer(r'(?:file|source|src|url)\s*[:=]\s*["\']([^"\']+\.(?:m3u8|mp4)[^"\']*)["\']', script_text, re.I):
+            src = m.group(1).replace('\\/', '/')
+            if src not in [v.get('m3u8_url', '') or v.get('embed_url', '') for v in videos]:
+                vtype = 'hls' if '.m3u8' in src else 'direct'
+                videos.append({'embed_url': src, 'm3u8_url': src if vtype == 'hls' else '', 'type': vtype, 'server': len(videos) + 1})
+        # iframes
+        for m in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', script_text):
+            src = m.group(1).replace('\\/', '/')
+            if src and not any(x in src.lower() for x in ['google', 'facebook', 'twitter', 'ads', 'ibit.ly', 'doubleclick']):
+                if src not in [v.get('embed_url', '') for v in videos]:
+                    videos.append({'embed_url': src, 'type': 'iframe', 'server': len(videos) + 1})
+
+    # 2) Check for iframes in HTML directly
+    for iframe in soup.select('iframe[src]'):
+        src = iframe.get('src', '')
+        if src and not any(x in src.lower() for x in ['google', 'facebook', 'twitter', 'ads', 'ibit.ly', 'doubleclick']):
+            if src not in [v.get('embed_url', '') for v in videos]:
+                videos.append({'embed_url': src, 'type': 'iframe', 'server': len(videos) + 1})
+
+    # 3) If no m3u8 found yet, check LiteSpeed combined JS bundle
+    if not any(v.get('type') == 'hls' for v in videos):
+        ls_match = re.search(r'wp-content/litespeed/js/[a-f0-9]+\.js[^"\']*', page_text)
+        if ls_match:
+            js_url = f"{K35TANMAI_BASE}/{ls_match.group(0)}"
+            jr = safe_request(js_url, 'k35tanmai')
+            if jr and jr.status_code == 200:
+                js_text = jr.text
+                # Extract m3u8 URLs from the JS bundle (normal quotes)
+                for m in re.finditer(r'(?:file|source|src)\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']', js_text, re.I):
+                    src = m.group(1).replace('\\/', '/')
+                    if src not in [v.get('m3u8_url', '') or v.get('embed_url', '') for v in videos]:
+                        videos.insert(0, {'embed_url': src, 'm3u8_url': src, 'type': 'hls', 'server': 1})
+                # Escaped JSON pattern: file: \"https:\/\/...\/index.m3u8\"
+                # The URL contains \/ so we match everything between \" markers
+                for m in re.finditer(r'file:\s*\\"(.*?\.m3u8.*?)\\"', js_text):
+                    src = m.group(1).replace('\\/', '/').replace('\\', '')
+                    if src.startswith('http') and src not in [v.get('m3u8_url', '') or v.get('embed_url', '') for v in videos]:
+                        videos.insert(0, {'embed_url': src, 'm3u8_url': src, 'type': 'hls', 'server': 1})
+
+    # Renumber servers and add video_id for HLS entries
+    for i, v in enumerate(videos):
+        v['server'] = i + 1
+        if v.get('type') == 'hls' and v.get('m3u8_url'):
+            v['video_id'] = encode_url(v['m3u8_url'])
+
+    # Fallback: use the page itself as iframe
+    if not videos:
+        videos.append({'embed_url': url, 'type': 'iframe', 'server': 1})
+
+    return {'videos': videos, 'servers': videos, 'next_episode': None}
+
+
+def k35tanmai_search(query):
+    """Search anime on k35tanmai."""
+    url = f"{K35TANMAI_BASE}/?s={urllib.parse.quote(query)}"
+    r = safe_request(url, 'k35tanmai')
+    if not r or r.status_code != 200:
+        return []
+
+    soup = BeautifulSoup(r.text, 'lxml')
+    results = []
+
+    for item_el in soup.select('div.e-loop-item'):
+        link = item_el.select_one('a[href]')
+        if not link:
+            continue
+        href = link.get('href', '')
+        if 'k35tanmai.com' not in href:
+            continue
+        slug = href.rstrip('/').split('/')[-1]
+        if not slug:
+            continue
+
+        img = item_el.select_one('img')
+        image = ''
+        if img:
+            image = img.get('src', '') or img.get('data-src', '')
+
+        title = ''
+        for heading in item_el.select('.elementor-heading-title'):
+            a_tag = heading.select_one('a[href]')
+            if a_tag and 'k35tanmai.com' in a_tag.get('href', ''):
+                title = a_tag.get_text(strip=True)
+                break
+        if not title and img:
+            title = img.get('alt', slug)
+
+        if slug not in [r_item['slug'] for r_item in results]:
+            results.append({'title': title, 'slug': slug, 'url': href, 'image': image})
+
+    return results
+
+
+# ============================================================
+# ANIFUME.COM SCRAPER
+# ============================================================
+ANIFUME_BASE = 'https://anifume.com'
+
+ANIFUME_CATEGORIES = {
+    'all': '/',
+    'ซับไทย': '/',
+    'พากย์ไทย': '/',
+}
+
+
+def anifume_catalog(page=1, category='all'):
+    """Get anime catalog from anifume."""
+    if page > 1:
+        url = f"{ANIFUME_BASE}/page/{page}"
+    else:
+        url = f"{ANIFUME_BASE}/"
+
+    r = safe_request(url, 'anifume')
+    if not r or r.status_code != 200:
+        return {'items': [], 'page': page, 'has_next': False}
+
+    soup = BeautifulSoup(r.text, 'lxml')
+    items = []
+
+    for col in soup.select('div.col-p'):
+        link = col.select_one('div.col-title a[href]') or col.select_one('div.col-img a[href]')
+        if not link:
+            continue
+        href = link.get('href', '')
+        if not href.startswith('http'):
+            href = f"{ANIFUME_BASE}{href}"
+
+        slug_match = re.search(r'/(\d+)(?:/|$)', href.rstrip('/'))
+        if not slug_match:
+            continue
+        slug = slug_match.group(1)
+
+        img = col.select_one('div.col-img img') or col.select_one('img')
+        image = ''
+        if img:
+            image = img.get('src', '') or img.get('data-src', '')
+            if image and not image.startswith('http'):
+                image = f"{ANIFUME_BASE}{image}"
+
+        title_el = col.select_one('div.col-title a')
+        title = title_el.get_text(strip=True) if title_el else ''
+
+        lang = ''
+        if 'พากย์ไทย' in title and 'ซับไทย' in title:
+            lang = 'ซับไทย/พากย์ไทย'
+        elif 'พากย์ไทย' in title:
+            lang = 'พากย์ไทย'
+        elif 'ซับไทย' in title:
+            lang = 'ซับไทย'
+
+        if category == 'พากย์ไทย' and 'พากย์ไทย' not in title:
+            continue
+        if category == 'ซับไทย' and 'ซับไทย' not in title:
+            continue
+
+        items.append({
+            'title': title,
+            'slug': slug,
+            'url': href,
+            'image': image,
+            'quality': lang,
+        })
+
+    seen = set()
+    unique = []
+    for it in items:
+        if it['slug'] not in seen:
+            seen.add(it['slug'])
+            unique.append(it)
+    items = unique
+
+    has_next = bool(soup.select_one('div.pagenavi a.next') or
+                     re.search(rf'page/{page + 1}', r.text))
+    return {'items': items, 'page': page, 'has_next': has_next}
+
+
+def anifume_detail(slug):
+    """Get anime detail from anifume. Slug is the numeric post ID."""
+    url = f"{ANIFUME_BASE}/{slug}"
+    r = safe_request(url, 'anifume')
+    if not r or r.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(r.text, 'lxml')
+
+    title = ''
+    h1 = soup.select_one('h1.post-title, h1')
+    if h1:
+        title = h1.get_text(strip=True)
+    if not title:
+        og_title = soup.select_one('meta[property="og:title"]')
+        if og_title:
+            title = og_title.get('content', '').strip()
+
+    poster = ''
+    poster_el = soup.select_one('div.post-content-img img') or soup.select_one('.content-row img')
+    if poster_el:
+        poster = poster_el.get('src', '')
+        if poster and not poster.startswith('http'):
+            poster = f"{ANIFUME_BASE}{poster}"
+
+    synopsis = ''
+    desc_el = soup.select_one('div.content-des')
+    if desc_el:
+        synopsis = desc_el.get_text(strip=True)[:500]
+
+    episodes = []
+    current_lang = ''
+
+    # Parse episode links separated by language markers
+    eplink_wrap = soup.select_one('div.eplink-wrap')
+    if eplink_wrap:
+        for el in eplink_wrap.find_all(['span', 'div', 'a']):
+            if el.name == 'span' and 'eptext' in el.get('class', []):
+                text = el.get_text(strip=True)
+                # Check which keyword appears first (handles "ซับไทย (พากย์ไทย อยู่ข้างล่าง)")
+                sub_pos = text.find('ซับไทย')
+                dub_pos = text.find('พากย์ไทย')
+                if sub_pos >= 0 and (dub_pos < 0 or sub_pos < dub_pos):
+                    current_lang = 'ซับไทย'
+                elif dub_pos >= 0:
+                    current_lang = 'พากย์ไทย'
+                continue
+
+            if el.name == 'a' and el.get('href'):
+                ep_href = el.get('href', '')
+                if not ep_href or slug not in ep_href:
+                    continue
+                if not ep_href.startswith('http'):
+                    ep_href = f"{ANIFUME_BASE}{ep_href}"
+
+                ep_slug_part = ep_href.rstrip('/').split('/')[-1]
+                full_ep_slug = f"{slug}/{ep_slug_part}"
+
+                num_match = re.search(r'(\d+)$', ep_slug_part)
+                ep_num = int(num_match.group(1)) if num_match else len(episodes) + 1
+
+                lang_label = f" [{current_lang}]" if current_lang else ''
+                episodes.append({
+                    'number': ep_num,
+                    'slug': full_ep_slug,
+                    'title': f"ตอนที่ {ep_num}{lang_label}",
+                    'language': current_lang,
+                })
+
+    # Fallback: look for episode links directly
+    if not episodes:
+        for a_tag in soup.select(f'a[href*="/{slug}/"]'):
+            ep_href = a_tag.get('href', '')
+            ep_text = a_tag.get_text(strip=True)
+            if not ep_href:
+                continue
+            if not ep_href.startswith('http'):
+                ep_href = f"{ANIFUME_BASE}{ep_href}"
+            ep_slug_part = ep_href.rstrip('/').split('/')[-1]
+            full_ep_slug = f"{slug}/{ep_slug_part}"
+            num_match = re.search(r'(\d+)', ep_slug_part)
+            ep_num = int(num_match.group(1)) if num_match else len(episodes) + 1
+            lang = 'พากย์ไทย' if ('-th-' in ep_slug_part or 'พากย์ไทย' in ep_text) else 'ซับไทย'
+            episodes.append({
+                'number': ep_num,
+                'slug': full_ep_slug,
+                'title': f"ตอนที่ {ep_num} [{lang}]",
+                'language': lang,
+            })
+
+    return {
+        'title': title,
+        'slug': slug,
+        'poster': poster,
+        'synopsis': synopsis,
+        'episodes': episodes,
+        'episode_count': len(episodes),
+    }
+
+
+def anifume_episode(ep_slug):
+    """Get video for an anifume episode. ep_slug format: {animeID}/{ep-slug-part}"""
+    url = f"{ANIFUME_BASE}/{ep_slug}"
+    r = safe_request(url, 'anifume')
+    if not r or r.status_code != 200:
+        return None
+
+    videos = []
+
+    # Extract player iframe URL from inline JS
+    iframe_match = re.search(r'innerHTML\s*=\s*[\'"](.*?iframe.*?src=[\'\"]([^\'\"]+)[\'\"].*?)[\'"]', r.text)
+    if iframe_match:
+        player_url = iframe_match.group(2)
+        if not player_url.startswith('http'):
+            player_url = f"{ANIFUME_BASE}{player_url}"
+        extracted = _extract_anifume_videos(player_url)
+        if extracted:
+            videos.extend(extracted)
+        else:
+            videos.append({'embed_url': player_url, 'type': 'iframe', 'server': 1})
+
+    # Look for direct iframes
+    soup = BeautifulSoup(r.text, 'lxml')
+    for iframe in soup.select('iframe[src]'):
+        src = iframe.get('src', '')
+        existing_urls = [v.get('embed_url', '') for v in videos] + [v.get('direct_url', '') for v in videos]
+        if src and src not in existing_urls:
+            videos.append({'embed_url': src, 'type': 'iframe', 'server': len(videos) + 1})
+
+    # Fallback
+    if not videos:
+        videos.append({'embed_url': url, 'type': 'iframe', 'server': 1})
+
+    # Renumber servers
+    for i, v in enumerate(videos):
+        v['server'] = i + 1
+
+    return {'videos': videos, 'servers': videos, 'next_episode': None}
+
+
+def _extract_anifume_videos(player_url):
+    """Extract ALL video sources from anifume player page (JWPlayer). Returns list of video dicts."""
+    r = safe_request(player_url, 'anifume', headers={'Referer': f'{ANIFUME_BASE}/'})
+    if not r or r.status_code != 200:
+        return []
+
+    text = r.text
+    results = []
+
+    # 1) JWPlayer sources - find all MP4/m3u8 URLs with quality labels
+    sources = []
+    for m in re.finditer(r'["\']file["\']\s*:\s*["\']([^"\']+\.(?:mp4|m3u8)[^"\']*)["\']', text, re.I):
+        url = m.group(1)
+        label_match = re.search(r'["\']label["\']\s*:\s*["\']([^"\']+)["\']', text[m.end():m.end()+200])
+        label = label_match.group(1) if label_match else ''
+        sources.append({'url': url, 'label': label})
+
+    if sources:
+        def quality_order(s):
+            label = s.get('label', '')
+            for q, val in [('1080', 4), ('720', 3), ('480', 2), ('360', 1)]:
+                if q in label:
+                    return val
+            return 0
+        sources.sort(key=quality_order, reverse=True)
+        for i, src in enumerate(sources):
+            if '.m3u8' in src['url']:
+                results.append({'m3u8_url': src['url'], 'embed_url': player_url, 'type': 'hls',
+                                'server': i + 1, 'video_id': encode_url(src['url']), 'label': src.get('label', '')})
+            else:
+                results.append({'direct_url': src['url'], 'embed_url': player_url, 'type': 'direct',
+                                'server': i + 1, 'label': src.get('label', '')})
+        return results
+
+    # 2) Generic patterns
+    m3u8_match = re.search(r'(?:source|src|file|url)\s*[:=]\s*["\']([^"\']+\.m3u8[^"\']*)["\']', text, re.I)
+    if m3u8_match:
+        return [{'m3u8_url': m3u8_match.group(1), 'embed_url': player_url, 'type': 'hls', 'server': 1,
+                 'video_id': encode_url(m3u8_match.group(1))}]
+
+    mp4_match = re.search(r'(?:source|src|file|url)\s*[:=]\s*["\']([^"\']+\.mp4[^"\']*)["\']', text, re.I)
+    if mp4_match:
+        return [{'direct_url': mp4_match.group(1), 'embed_url': player_url, 'type': 'direct', 'server': 1}]
+
+    # 3) Nested iframe
+    iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', text)
+    if iframe_match:
+        src = iframe_match.group(1)
+        if src != player_url:
+            return [{'embed_url': src, 'type': 'iframe', 'server': 1}]
+
+    return []
+
+
+def anifume_search(query):
+    """Search anime on anifume."""
+    url = f"{ANIFUME_BASE}/search/{urllib.parse.quote(query)}"
+    r = safe_request(url, 'anifume')
+    if not r or r.status_code != 200:
+        return []
+
+    soup = BeautifulSoup(r.text, 'lxml')
+    results = []
+
+    for col in soup.select('div.col-p'):
+        link = col.select_one('div.col-title a[href]') or col.select_one('div.col-img a[href]')
+        if not link:
+            continue
+        href = link.get('href', '')
+        if not href.startswith('http'):
+            href = f"{ANIFUME_BASE}{href}"
+
+        slug_match = re.search(r'/(\d+)(?:/|$)', href.rstrip('/'))
+        if not slug_match:
+            continue
+        slug = slug_match.group(1)
+
+        img = col.select_one('div.col-img img') or col.select_one('img')
+        image = ''
+        if img:
+            image = img.get('src', '') or img.get('data-src', '')
+            if image and not image.startswith('http'):
+                image = f"{ANIFUME_BASE}{image}"
+
+        title_el = col.select_one('div.col-title a')
+        title = title_el.get_text(strip=True) if title_el else ''
+
+        if slug not in [r_item['slug'] for r_item in results]:
+            results.append({'title': title, 'slug': slug, 'url': href, 'image': image})
+
+    return results
+
+
+# ============================================================
 # SHARED HALIM THEME VIDEO EXTRACTION
 # ============================================================
 PLAYER_BASE = 'https://main.24playerhd.com'
@@ -1110,6 +1677,13 @@ def get_hls_variant(variant_url):
         referer = 'https://ok-hd.com/'
     elif 'anccplayer' in variant_url:
         referer = 'https://anccplayer.cyou/'
+    else:
+        # Generic: derive referer from URL domain
+        try:
+            parsed = urllib.parse.urlparse(variant_url)
+            referer = f'{parsed.scheme}://{parsed.hostname}/'
+        except:
+            pass
 
     r = safe_request(variant_url, 'hls', headers={
         'Referer': referer,
@@ -1122,6 +1696,14 @@ def get_hls_variant(variant_url):
     rewritten = []
     for line in lines:
         if line.startswith('#'):
+            # Rewrite key URI in #EXT-X-KEY tags
+            key_match = re.search(r'URI="([^"]+)"', line)
+            if key_match:
+                key_url = key_match.group(1)
+                if not key_url.startswith('http'):
+                    key_url = f'{base_url}/{key_url}'
+                encoded_key = encode_url(key_url)
+                line = line.replace(key_match.group(0), f'URI="/hls/segment/{encoded_key}"')
             rewritten.append(line)
         elif line.strip():
             seg_url = line.strip()
@@ -1178,6 +1760,22 @@ def api_sources():
                 'categories': list(WOWDRAMA_CATEGORIES.keys()),
                 'type': 'drama',
             },
+            {
+                'id': 'k35tanmai',
+                'name': 'K35Tanmai',
+                'description': 'อนิเมะ/การ์ตูน พากย์ไทย ซับไทย HD',
+                'icon': '🎭',
+                'categories': list(K35TANMAI_CATEGORIES.keys()),
+                'type': 'anime',
+            },
+            {
+                'id': 'anifume',
+                'name': 'Anifume',
+                'description': 'อนิเมะ ซับไทย/พากย์ไทย อัปเดตทุกวัน',
+                'icon': '🔥',
+                'categories': list(ANIFUME_CATEGORIES.keys()),
+                'type': 'anime',
+            },
         ]
     })
 
@@ -1195,6 +1793,10 @@ def api_catalog(source):
         return jsonify(hdmovie_catalog(page, category))
     elif source == 'wowdrama':
         return jsonify(wowdrama_catalog(page, category))
+    elif source == 'k35tanmai':
+        return jsonify(k35tanmai_catalog(page, category))
+    elif source == 'anifume':
+        return jsonify(anifume_catalog(page, category))
     return jsonify({'error': 'Unknown source'}), 404
 
 
@@ -1208,6 +1810,10 @@ def api_detail(source, slug):
         result = hdmovie_detail(slug)
     elif source == 'wowdrama':
         result = wowdrama_detail(slug)
+    elif source == 'k35tanmai':
+        result = k35tanmai_detail(slug)
+    elif source == 'anifume':
+        result = anifume_detail(slug)
     else:
         return jsonify({'error': 'Unknown source'}), 404
 
@@ -1221,6 +1827,14 @@ def api_episode(source, slug):
     """Get video servers for a specific episode."""
     if source == 'animegojo':
         result = animegojo_episode(slug)
+        return jsonify(result) if result else (jsonify({'error': 'Not found'}), 404)
+
+    elif source == 'k35tanmai':
+        result = k35tanmai_episode(slug)
+        return jsonify(result) if result else (jsonify({'error': 'Not found'}), 404)
+
+    elif source == 'anifume':
+        result = anifume_episode(slug)
         return jsonify(result) if result else (jsonify({'error': 'Not found'}), 404)
 
     elif source == 'wowdrama':
@@ -1299,6 +1913,10 @@ def api_search(source):
         return jsonify(_search_halim(HDMOVIE_BASE, query, 'hdmovie'))
     elif source == 'wowdrama':
         return jsonify(wowdrama_search(query))
+    elif source == 'k35tanmai':
+        return jsonify(k35tanmai_search(query))
+    elif source == 'anifume':
+        return jsonify(anifume_search(query))
     return jsonify([])
 
 
@@ -1433,6 +2051,25 @@ def hls_ancc(link2):
                     headers={'Access-Control-Allow-Origin': '*'})
 
 
+@app.route('/hls/generic/<encoded_url>')
+def hls_generic(encoded_url):
+    """Proxy master m3u8 from any URL (base64 url-safe encoded)."""
+    url = decode_url(encoded_url)
+    if not url:
+        return 'Invalid URL', 400
+    # Auto-detect referer from URL domain
+    try:
+        parsed = urllib.parse.urlparse(url)
+        referer = f'{parsed.scheme}://{parsed.hostname}/'
+    except:
+        referer = ''
+    content = get_generic_hls_master(url, referer)
+    if content is None:
+        return 'Not found', 404
+    return Response(content, content_type='application/vnd.apple.mpegurl',
+                    headers={'Access-Control-Allow-Origin': '*'})
+
+
 @app.route('/hls/variant/<encoded_url>')
 def hls_variant(encoded_url):
     """Proxy variant m3u8 playlist."""
@@ -1461,6 +2098,12 @@ def hls_segment(encoded_url):
         referer = 'https://ok-hd.com/'
     elif 'anccplayer' in url:
         referer = 'https://anccplayer.cyou/'
+    else:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            referer = f'{parsed.scheme}://{parsed.hostname}/'
+        except:
+            pass
 
     r = safe_request(url, 'hls', headers={
         'Referer': referer,
@@ -1501,6 +2144,10 @@ def proxy_image():
         referer = HDMOVIE_BASE
     elif 'wow-drama' in url:
         referer = WOWDRAMA_BASE
+    elif 'k35tanmai' in url:
+        referer = K35TANMAI_BASE
+    elif 'anifume' in url:
+        referer = ANIFUME_BASE
 
     r = safe_request(url, 'images', headers={
         'Referer': referer + '/' if referer else '',
@@ -1553,17 +2200,30 @@ def send_telegram(message):
 
 if __name__ == '__main__':
     import socket
+    port = int(os.environ.get('PORT', 5555))
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
 
     print("=" * 60)
     print("  STREAMING PROXY SERVER")
     print("=" * 60)
-    print(f"  PC:     http://localhost:5555")
-    print(f"  Mobile: http://{local_ip}:5555")
-    print(f"  Sources: AnimeGojo | Series-Days | 24-HDMovie | WowDrama")
+    print(f"  PC:     http://localhost:{port}")
+    print(f"  Mobile: http://{local_ip}:{port}")
+    print(f"  Sources: AnimeGojo | Series-Days | 24-HDMovie | WowDrama | K35Tanmai | Anifume")
     print("=" * 60)
 
-    send_telegram(f"🎬 Server started\nPC: http://localhost:5555\nMobile: http://{local_ip}:5555")
+    send_telegram(f"🎬 Server started\nPC: http://localhost:{port}\nMobile: http://{local_ip}:{port}")
 
-    app.run(host='0.0.0.0', port=5555, debug=False, threaded=True)
+    try:
+        from waitress import serve
+        print("  [OK] Using waitress WSGI server (stable mode)")
+        print("  Press Ctrl+C to stop")
+        print("=" * 60)
+        serve(app, host='0.0.0.0', port=port,
+              threads=8,
+              connection_limit=500,
+              channel_timeout=120,
+              recv_bytes=65536)
+    except ImportError:
+        print("  [WARN] waitress not found, falling back to Flask dev server")
+        app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

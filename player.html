@@ -333,6 +333,41 @@ body {
     z-index: 10;
 }
 
+/* BRIGHTNESS CONTROL */
+.brightness-ctrl {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text2);
+    padding: 4px 0;
+}
+.brightness-ctrl input[type=range] {
+    -webkit-appearance: none;
+    width: 100px;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+.brightness-ctrl input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 0 4px rgba(108,92,231,0.6);
+}
+.brightness-ctrl .bval {
+    min-width: 38px;
+    text-align: right;
+    font-size: 12px;
+    color: var(--text);
+}
+
 /* LOADING */
 .loading {
     text-align: center;
@@ -465,6 +500,13 @@ body {
         <button class="ctrl-btn" id="autoNextBtn" onclick="toggleAutoNext()">🔄 Auto-Next: ON</button>
         <button class="ctrl-btn" id="prevEpBtn" onclick="playPrevEpisode()" style="display:none">⬅ ตอนก่อน</button>
         <button class="ctrl-btn" id="nextEpBtn" onclick="playNextEpisode()">➡ ตอนต่อไป</button>
+        <div class="brightness-ctrl" id="brightnessCtrl">
+            <span title="ความสว่าง">☀️</span>
+            <input type="range" id="brightnessSlider" min="20" max="220" value="100"
+                   oninput="setVideoBrightness(this.value)" title="ปรับความสว่าง">
+            <span class="bval" id="brightnessVal">100%</span>
+            <button class="ctrl-btn" onclick="resetBrightness()" style="padding:3px 9px;font-size:11px" title="รีเซ็ต">↺</button>
+        </div>
     </div>
 </div>
 
@@ -495,6 +537,8 @@ const state = {
     stallRecoveryActive: false,
     stallCount: 0,
     stallTimer: null,
+    stallCheckInterval: null,  // position-based stall checker
+    serverFailCount: 0,        // consecutive recovery failures on this server
     currentEpisodeIndex: -1,
     episodes: [],
     currentSlug: '',
@@ -749,12 +793,14 @@ async function playEpisode(index) {
 
 function renderServerTabs() {
     const el = document.getElementById('serverTabs');
-    const labels = ['เซิร์ฟเวอร์หลัก', 'สำรอง 1', 'สำรอง 2'];
-    el.innerHTML = state.videos.map((v, i) =>
-        `<button class="server-tab ${i === 0 ? 'active' : ''}" onclick="playServer(${i})" data-idx="${i}">
-            ${labels[i] || 'เซิร์ฟเวอร์ ' + (i + 1)}
-        </button>`
-    ).join('');
+    const defaultLabels = ['เซิร์ฟเวอร์หลัก', 'สำรอง 1', 'สำรอง 2'];
+    el.innerHTML = state.videos.map((v, i) => {
+        let label = v.label ? `${v.label}` : (defaultLabels[i] || 'เซิร์ฟเวอร์ ' + (i + 1));
+        if (v.type === 'direct') label = '▶ ' + label;
+        return `<button class="server-tab ${i === 0 ? 'active' : ''}" onclick="playServer(${i})" data-idx="${i}">
+            ${label}
+        </button>`;
+    }).join('');
 }
 
 function playServer(index) {
@@ -769,6 +815,8 @@ function playServer(index) {
 
     if (video.type === 'hls' && video.video_id) {
         playHLS(video.video_id, video.m3u8_url);
+    } else if (video.type === 'direct' && video.direct_url) {
+        playDirect(video.direct_url, video.label || '');
     } else if (video.embed_url) {
         playIframe(video.embed_url);
     }
@@ -790,18 +838,37 @@ function playHLS(videoId, m3u8Url) {
         // WowDrama top-cdn/ok-hd HLS
         const cdn = m3u8Url.includes('ok-hd.com') ? 'ok-hd.com' : 'top-cdn.com';
         masterUrl = `/hls/topcdn/${videoId}?cdn=${cdn}`;
-    } else {
+    } else if (m3u8Url && (m3u8Url.includes('24playerhd') || m3u8Url.includes('newplaylist'))) {
         // 24playerhd HLS
-        const isBackup = m3u8Url && m3u8Url.includes('newplaylist_g');
+        const isBackup = m3u8Url.includes('newplaylist_g');
         masterUrl = `/hls/master/${videoId}${isBackup ? '?backup=1' : ''}`;
+    } else {
+        // Generic HLS proxy (k35tanmai, anifume, etc.)
+        masterUrl = `/hls/generic/${videoId}`;
     }
 
     if (Hls.isSupported()) {
         const hls = new Hls({
-            maxBufferLength: 30,
-            maxMaxBufferLength: 60,
-            startLevel: -1,
+            // ---- BUFFER ----
+            maxBufferLength: 60,            // pre-buffer 60s
+            maxMaxBufferLength: 120,        // allow up to 120s
+            maxBufferHole: 0.5,             // auto-skip buffer holes ≤ 0.5s
+            maxBufferSize: 150 * 1000 * 1000, // 150 MB in-memory cap
+            // ---- QUALITY ----
+            startLevel: -1,                 // auto quality
             capLevelToPlayerSize: true,
+            // ---- RETRIES ----
+            fragLoadingMaxRetry: 8,
+            fragLoadingRetryDelay: 500,
+            fragLoadingMaxRetryTimeout: 30000,
+            manifestLoadingMaxRetry: 6,
+            manifestLoadingRetryDelay: 500,
+            levelLoadingMaxRetry: 6,
+            levelLoadingRetryDelay: 500,
+            // ---- PERFORMANCE ----
+            enableWorker: true,
+            lowLatencyMode: false,
+            progressive: true,
         });
         state.hls = hls;
 
@@ -811,12 +878,18 @@ function playHLS(videoId, m3u8Url) {
             videoEl.play().catch(() => {});
         });
         hls.on(Hls.Events.ERROR, (event, data) => {
+            console.warn('[HLS Error]', data.type, data.details, data.fatal);
             if (data.fatal) {
                 if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                    showToast('เครือข่ายขัดข้อง - กำลังลองใหม่');
+                    showToast('⚠️ เครือข่ายขัดข้อง - กำลังลองใหม่อัตโนมัติ');
                     hls.startLoad();
+                } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                    showToast('⚠️ ข้อผิดพลาดมีเดีย - กำลังกู้คืน');
+                    hls.recoverMediaError();
                 } else {
-                    showToast('เกิดข้อผิดพลาด');
+                    // fatal decode/other error - try next server
+                    showToast('❌ ไม่สามารถโหลดได้ - ลองเซิร์ฟเวอร์สำรอง');
+                    setTimeout(() => autoSwitchServer(), 1500);
                 }
             }
         });
@@ -828,6 +901,37 @@ function playHLS(videoId, m3u8Url) {
 
     // Setup stall recovery and auto-next
     setupPlayerEvents(videoEl);
+
+    // Restore brightness setting to the new video element
+    try {
+        const saved = sessionStorage.getItem('sh_brightness');
+        if (saved && saved !== '100') {
+            videoEl.style.filter = `brightness(${saved}%)`;
+        }
+    } catch(e) {}
+}
+
+function playDirect(directUrl, label) {
+    state.currentVideoType = 'direct';
+    const container = document.getElementById('playerContainer');
+    container.innerHTML = `<video id="videoPlayer" controls playsinline autoplay></video>
+        <div class="stall-indicator" id="stallIndicator">⚡ กำลังกู้คืน...</div>`;
+    const videoEl = document.getElementById('videoPlayer');
+    videoEl.src = directUrl;
+    videoEl.play().catch(() => {});
+
+    // Setup stall recovery and auto-next
+    setupPlayerEvents(videoEl);
+
+    // Restore brightness
+    try {
+        const saved = sessionStorage.getItem('sh_brightness');
+        if (saved && saved !== '100') {
+            videoEl.style.filter = `brightness(${saved}%)`;
+        }
+    } catch(e) {}
+
+    if (label) showToast(`▶ กำลังเล่น ${label}`);
 }
 
 function playIframe(embedUrl) {
@@ -839,10 +943,18 @@ function playIframe(embedUrl) {
 function stopPlayer() {
     state.stallCount = 0;
     state.stallRecoveryActive = false;
+    state.serverFailCount = 0;
     if (state.stallTimer) {
+        clearInterval(state.stallTimer);
         clearTimeout(state.stallTimer);
         state.stallTimer = null;
     }
+    if (state.stallCheckInterval) {
+        clearInterval(state.stallCheckInterval);
+        state.stallCheckInterval = null;
+    }
+    hideRecoveryOverlay();
+    hideStallIndicator();
     if (state.hls) {
         state.hls.destroy();
         state.hls = null;
@@ -858,8 +970,12 @@ function stopPlayer() {
 // PLAYER EVENTS & STALL RECOVERY
 // ============================================================
 function setupPlayerEvents(videoEl) {
-    let lastTime = 0;
-    let stallCheckInterval = null;
+    let lastPos = -1;
+    let lastPosAt = Date.now();
+    const STALL_THRESHOLD_MS = 5000;   // frozen position for 5s = stall
+    const AUTO_SWITCH_AFTER = 3;       // switch server after N consecutive recoveries
+
+    state.serverFailCount = 0;
 
     // Auto-next on video end
     videoEl.addEventListener('ended', () => {
@@ -869,62 +985,141 @@ function setupPlayerEvents(videoEl) {
         }
     });
 
-    // Stall detection
+    // Reset position tracker when playback resumes
     videoEl.addEventListener('playing', () => {
+        lastPos = videoEl.currentTime;
+        lastPosAt = Date.now();
         state.stallCount = 0;
         hideStallIndicator();
-        if (stallCheckInterval) clearInterval(stallCheckInterval);
+    });
 
-        stallCheckInterval = setInterval(() => {
-            if (videoEl.paused || videoEl.ended) return;
+    videoEl.addEventListener('seeked', () => {
+        lastPos = videoEl.currentTime;
+        lastPosAt = Date.now();
+    });
 
-            if (videoEl.readyState < 3 && !videoEl.seeking) {
-                // Video is stalling
+    // ---- Position-based stall detector (runs every second) ----
+    if (state.stallCheckInterval) {
+        clearInterval(state.stallCheckInterval);
+        state.stallCheckInterval = null;
+    }
+    state.stallCheckInterval = setInterval(() => {
+        if (!videoEl || videoEl.paused || videoEl.ended) {
+            // Not playing - update reference so we don't false-trigger on resume
+            lastPos = videoEl ? videoEl.currentTime : lastPos;
+            lastPosAt = Date.now();
+            return;
+        }
+        if (state.stallRecoveryActive) return;
+
+        const curPos = videoEl.currentTime;
+        if (curPos !== lastPos) {
+            // Playback is progressing - healthy
+            lastPos = curPos;
+            lastPosAt = Date.now();
+            state.stallCount = 0;
+            hideStallIndicator();
+        } else {
+            // Position frozen
+            const frozenMs = Date.now() - lastPosAt;
+            if (frozenMs >= STALL_THRESHOLD_MS) {
+                // Real stall confirmed
                 state.stallCount++;
-                if (state.stallCount >= 3 && !state.stallRecoveryActive) {
+                lastPosAt = Date.now(); // reset timer so we don't fire every second
+                console.warn(`[Stall] detected #${state.stallCount}, frozenMs=${frozenMs}`);
+
+                if (state.stallCount >= AUTO_SWITCH_AFTER && state.videos.length > 1) {
+                    // Too many stalls on this server - switch
+                    state.stallCount = 0;
+                    state.serverFailCount++;
+                    showToast('⚠️ สลับเซิร์ฟเวอร์อัตโนมัติ...');
+                    setTimeout(() => autoSwitchServer(), 500);
+                } else if (!state.stallRecoveryActive) {
                     performStallRecovery(videoEl);
                 }
-            } else {
-                state.stallCount = 0;
             }
-            lastTime = videoEl.currentTime;
-        }, 2000);
-    });
-
-    videoEl.addEventListener('waiting', () => {
-        state.stallCount++;
-        if (state.stallCount >= 3 && !state.stallRecoveryActive) {
-            performStallRecovery(videoEl);
         }
-    });
-
-    // Cleanup on pause
-    videoEl.addEventListener('pause', () => {
-        // Don't reset during stall recovery
-        if (!state.stallRecoveryActive) {
-            state.stallCount = 0;
-        }
-    });
+    }, 1000);
 }
 
 function performStallRecovery(videoEl) {
     state.stallRecoveryActive = true;
     const savedTime = videoEl.currentTime;
-    showStallIndicator();
-    showToast('⚡ ตรวจพบค้าง - กำลังกู้คืน...');
+    const duration = videoEl.duration;
+    const remaining = (duration && !isNaN(duration) && duration > 0) ? duration - savedTime : Infinity;
 
-    // Jump forward 10 minutes to trigger buffer reload
-    videoEl.currentTime = savedTime + 600; // +10 min
-
-    // Wait 2 seconds then jump back
-    state.stallTimer = setTimeout(() => {
-        videoEl.currentTime = savedTime + 2; // +2 sec from original to skip bad segment
+    // If remaining time < 15s: skip to next episode instead of stall recovery
+    if (remaining < 15) {
         state.stallRecoveryActive = false;
         state.stallCount = 0;
         hideStallIndicator();
-        videoEl.play().catch(() => {});
-        showToast('✅ กู้คืนสำเร็จ');
-    }, 2500);
+        if (state.autoNext && state.currentEpisodeIndex < state.episodes.length - 1) {
+            showToast('⏭ เหลือเวลาน้อยกว่า 15 วิ - ข้ามตอนต่อไป...');
+            setTimeout(() => playNextEpisode(), 1500);
+        } else {
+            showToast('ใกล้จบตอนแล้ว');
+        }
+        return;
+    }
+
+    showStallIndicator();
+    showToast('⚡ ตรวจพบค้าง - กำลังกู้คืน...');
+
+    // Show overlay to hide the 10s-ahead scene
+    showRecoveryOverlay(3);
+
+    // Jump forward exactly 10 seconds to reload buffer
+    videoEl.currentTime = Math.min(savedTime + 10, (duration > 0 ? duration - 1 : savedTime + 10));
+
+    // 3-second countdown then jump back to original stall position
+    let countdown = 3;
+    state.stallTimer = setInterval(() => {
+        countdown--;
+        updateRecoveryCountdown(countdown);
+        if (countdown <= 0) {
+            clearInterval(state.stallTimer);
+            state.stallTimer = null;
+            // Jump back exactly where stall happened
+            videoEl.currentTime = savedTime;
+            hideRecoveryOverlay();
+            hideStallIndicator();
+            state.stallRecoveryActive = false;
+            state.stallCount = 0;
+            videoEl.play().catch(() => {});
+            showToast('✅ กู้คืนสำเร็จ - กลับฉากเดิม');
+        }
+    }, 1000);
+}
+
+function showRecoveryOverlay(countdown) {
+    const container = document.getElementById('playerContainer');
+    if (!container) return;
+    let overlay = document.getElementById('recoveryOverlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'recoveryOverlay';
+        overlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.90);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:20;color:#fff;';
+        overlay.innerHTML = `
+            <div id="recoveryCountdown" style="font-size:64px;font-weight:bold;line-height:1;color:#a29bfe">${countdown}</div>
+            <div style="font-size:15px;color:#bbb;margin-top:12px;text-align:center">⚡ กำลังกู้คืนวิดีโอ<br>กรุณารอสักครู่...</div>
+            <div style="margin-top:18px;width:40px;height:40px;border:3px solid rgba(255,255,255,0.2);border-top-color:#a29bfe;border-radius:50%;animation:spin 1s linear infinite"></div>
+        `;
+        container.appendChild(overlay);
+    } else {
+        const el = document.getElementById('recoveryCountdown');
+        if (el) el.textContent = countdown;
+        overlay.style.display = 'flex';
+    }
+}
+
+function updateRecoveryCountdown(n) {
+    const el = document.getElementById('recoveryCountdown');
+    if (el) el.textContent = n > 0 ? n : '...';
+}
+
+function hideRecoveryOverlay() {
+    const overlay = document.getElementById('recoveryOverlay');
+    if (overlay) overlay.style.display = 'none';
 }
 
 function showStallIndicator() {
@@ -937,12 +1132,26 @@ function hideStallIndicator() {
     if (el) el.style.display = 'none';
 }
 
+// Auto-switch to next available server when current one keeps stalling
+function autoSwitchServer() {
+    const tabs = document.querySelectorAll('.server-tab');
+    let currentIdx = 0;
+    tabs.forEach((t, i) => { if (t.classList.contains('active')) currentIdx = i; });
+    const nextIdx = (currentIdx + 1) % state.videos.length;
+    if (nextIdx !== currentIdx) {
+        showToast(`🔄 สลับไปเซิร์ฟเวอร์สำรอง ${nextIdx + 1}`);
+        playServer(nextIdx);
+    } else {
+        showToast('⚠️ ไม่สามารถโหลดวิดีโอได้ - กรุณาลองใหม่อีกครั้ง');
+    }
+}
+
 // ============================================================
 // PLAYER CONTROLS
 // ============================================================
 function skipTime(seconds) {
     const v = document.getElementById('videoPlayer');
-    if (v && state.currentVideoType === 'hls') {
+    if (v && (state.currentVideoType === 'hls' || state.currentVideoType === 'direct')) {
         v.currentTime += seconds;
     }
 }
@@ -1026,6 +1235,37 @@ function escapeHtml(text) {
     div.textContent = text;
     return div.innerHTML;
 }
+
+// ============================================================
+// BRIGHTNESS CONTROL
+// ============================================================
+function setVideoBrightness(val) {
+    val = Math.max(20, Math.min(220, parseInt(val)));
+    const v = document.getElementById('videoPlayer');
+    if (v) v.style.filter = `brightness(${val}%)`;
+    const label = document.getElementById('brightnessVal');
+    if (label) label.textContent = val + '%';
+    // Persist in session
+    try { sessionStorage.setItem('sh_brightness', val); } catch(e) {}
+}
+
+function resetBrightness() {
+    const slider = document.getElementById('brightnessSlider');
+    if (slider) { slider.value = 100; setVideoBrightness(100); }
+}
+
+// Restore brightness slider value from session on initial load
+(function restoreBrightness() {
+    try {
+        const saved = sessionStorage.getItem('sh_brightness');
+        if (saved) {
+            const slider = document.getElementById('brightnessSlider');
+            if (slider) { slider.value = saved; }
+            const label = document.getElementById('brightnessVal');
+            if (label) label.textContent = saved + '%';
+        }
+    } catch(e) {}
+})();
 
 // ============================================================
 // KEYBOARD SHORTCUTS
