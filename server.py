@@ -134,14 +134,19 @@ def safe_request(url, site_key='default', method='GET', data=None, headers=None,
     # ---- Layer 1: curl_cffi with Chrome TLS fingerprint (best for data center IPs) ----
     if HAS_CURL_CFFI and cf_requests:
         try:
+            kwargs = dict(headers=h, timeout=timeout, impersonate='chrome',
+                          verify=False, allow_redirects=True)
+            if stream:
+                kwargs['stream'] = True
             if method == 'POST':
-                r = cf_requests.post(url, data=data, headers=h, timeout=timeout,
-                                     impersonate='chrome', verify=False, allow_redirects=True)
+                r = cf_requests.post(url, data=data, **kwargs)
             else:
-                r = cf_requests.get(url, headers=h, timeout=timeout,
-                                    impersonate='chrome', verify=False, allow_redirects=True)
+                r = cf_requests.get(url, **kwargs)
             if r.status_code == 200:
-                log.info(f'[curl_cffi] OK {url} ({len(r.content)} bytes)')
+                if not stream:
+                    log.info(f'[curl_cffi] OK {url} ({len(r.content)} bytes)')
+                else:
+                    log.info(f'[curl_cffi] OK {url} (streaming)')
                 return r
             else:
                 log.warning(f'[curl_cffi] Status {r.status_code} from {url}')
@@ -2198,9 +2203,18 @@ def hls_segment(encoded_url):
         return 'Segment not found', 404
 
     def generate():
-        for chunk in r.iter_content(chunk_size=65536):
-            if chunk:
-                yield chunk
+        try:
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk:
+                    yield chunk
+        except Exception as e:
+            log.warning(f'[segment] Stream error: {e}')
+            # Fallback: try to yield .content if iter_content fails
+            try:
+                if hasattr(r, 'content') and r.content:
+                    yield r.content
+            except Exception:
+                pass
 
     ct = r.headers.get('Content-Type', 'video/mp2t')
     return Response(generate(), content_type=ct,
