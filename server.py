@@ -5,11 +5,23 @@ Sources: animegojo.com, series-days.com, 24-hdmovie.com, wow-drama.com, k35tanma
 Features: HLS proxy, privacy protection, auto-next, stall recovery, language filter (พากย์ไทย/ซับไทย)
 """
 
-import os, re, json, time, random, hashlib, threading, urllib.parse, base64
+import os, re, json, time, random, hashlib, threading, urllib.parse, base64, logging
 from datetime import datetime
 from flask import Flask, request, Response, jsonify, send_file, redirect
 import cloudscraper
 from bs4 import BeautifulSoup
+
+# curl_cffi provides real Chrome TLS fingerprint - critical for bypassing Cloudflare on data center IPs
+try:
+    from curl_cffi import requests as cf_requests
+    HAS_CURL_CFFI = True
+    print('[OK] curl_cffi loaded - enhanced Cloudflare bypass enabled')
+except ImportError:
+    HAS_CURL_CFFI = False
+    print('[WARN] curl_cffi not available - using cloudscraper only')
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+log = logging.getLogger('streamhub')
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
@@ -100,22 +112,68 @@ def privacy_delay():
     """Random delay to avoid pattern detection."""
     time.sleep(random.uniform(0.3, 1.5))
 
-def safe_request(url, site_key='default', method='GET', data=None, headers=None, timeout=20, stream=False):
-    """Make a request with full privacy protection."""
-    s = get_scraper(site_key)
+def safe_request(url, site_key='default', method='GET', data=None, headers=None, timeout=25, stream=False):
+    """Make a request with multi-layer bypass: curl_cffi (best) -> cloudscraper -> direct requests."""
     h = {
         'User-Agent': random_ua(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': random.choice(ACCEPT_LANGUAGE_POOL),
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
     }
     if headers:
         h.update(headers)
+
+    # ---- Layer 1: curl_cffi with Chrome TLS fingerprint (best for data center IPs) ----
+    if HAS_CURL_CFFI:
+        for browser in ['chrome', 'chrome110', 'chrome120']:
+            try:
+                if method == 'POST':
+                    r = cf_requests.post(url, data=data, headers=h, timeout=timeout,
+                                         impersonate=browser, verify=False)
+                else:
+                    r = cf_requests.get(url, headers=h, timeout=timeout,
+                                        impersonate=browser, verify=False)
+                if r.status_code == 200:
+                    return r
+                elif r.status_code == 403:
+                    log.warning(f'[curl_cffi/{browser}] 403 from {url}, trying next...')
+                    continue
+                else:
+                    return r  # Return non-403 errors as-is
+            except Exception as e:
+                log.warning(f'[curl_cffi/{browser}] Error {url}: {e}')
+                continue
+
+    # ---- Layer 2: cloudscraper (JS challenge solver) ----
+    s = get_scraper(site_key)
     try:
         if method == 'POST':
-            return s.post(url, data=data, headers=h, timeout=timeout, stream=stream)
+            r = s.post(url, data=data, headers=h, timeout=timeout, stream=stream)
         else:
-            return s.get(url, headers=h, timeout=timeout, stream=stream)
+            r = s.get(url, headers=h, timeout=timeout, stream=stream)
+        if r.status_code == 200:
+            return r
+        log.warning(f'[cloudscraper] Status {r.status_code} from {url}')
+        return r
     except Exception as e:
-        print(f"[Privacy Request Error] {url}: {e}")
+        log.warning(f'[cloudscraper] Error {url}: {e}')
+
+    # ---- Layer 3: plain requests as last resort ----
+    import requests as plain_requests
+    try:
+        if method == 'POST':
+            return plain_requests.post(url, data=data, headers=h, timeout=timeout, stream=stream, verify=False)
+        else:
+            return plain_requests.get(url, headers=h, timeout=timeout, stream=stream, verify=False)
+    except Exception as e:
+        log.error(f'[plain requests] Final fallback failed {url}: {e}')
         return None
 
 # ============================================================
@@ -1722,6 +1780,37 @@ def get_hls_variant(variant_url):
 @app.route('/')
 def index():
     return send_file('player.html')
+
+
+@app.route('/api/health')
+def api_health():
+    """Diagnostic endpoint - tests connectivity to each source website."""
+    sources_urls = {
+        'animegojo': 'https://animegojo.com/',
+        'seriesdays': 'https://series-days.com/',
+        'hdmovie': 'https://24-hdmovie.com/',
+        'wowdrama': 'https://wow-drama.com/',
+        'k35tanmai': 'https://k35tanmai.com/',
+        'anifume': 'https://anifume.com/',
+    }
+    results = {}
+    for name, url in sources_urls.items():
+        try:
+            r = safe_request(url, site_key=name, timeout=15)
+            if r:
+                results[name] = {
+                    'status': r.status_code,
+                    'ok': r.status_code == 200,
+                    'size': len(r.text) if hasattr(r, 'text') else 0,
+                }
+            else:
+                results[name] = {'status': 0, 'ok': False, 'error': 'No response'}
+        except Exception as e:
+            results[name] = {'status': 0, 'ok': False, 'error': str(e)}
+    return jsonify({
+        'curl_cffi': HAS_CURL_CFFI,
+        'sources': results,
+    })
 
 
 @app.route('/api/sources')
